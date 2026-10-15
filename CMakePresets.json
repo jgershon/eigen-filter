@@ -1,0 +1,81 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "clang",
+      "displayName": "Clang (Ninja)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "gcc",
+      "displayName": "GCC (Ninja)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "msvc",
+      "displayName": "MSVC (Visual Studio 2026)",
+      "inherits": "base",
+      "generator": "Visual Studio 18 2026",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "clang", "configurePreset": "clang" },
+    { "name": "gcc", "configurePreset": "gcc" },
+    { "name": "msvc", "configurePreset": "msvc", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    { "name": "clang", "inherits": "base", "configurePreset": "clang" },
+    { "name": "gcc", "inherits": "base", "configurePreset": "gcc" },
+    { "name": "msvc", "inherits": "base", "configurePreset": "msvc", "configuration": "Debug" }
+  ],
+  "workflowPresets": [
+    {
+      "name": "clang",
+      "steps": [
+        { "type": "configure", "name": "clang" },
+        { "type": "build", "name": "clang" },
+        { "type": "test", "name": "clang" }
+      ]
+    },
+    {
+      "name": "gcc",
+      "steps": [
+        { "type": "configure", "name": "gcc" },
+        { "type": "build", "name": "gcc" },
+        { "type": "test", "name": "gcc" }
+      ]
+    },
+    {
+      "name": "msvc",
+      "steps": [
+        { "type": "configure", "name": "msvc" },
+        { "type": "build", "name": "msvc" },
+        { "type": "test", "name": "msvc" }
+      ]
+    }
+  ]
+}
