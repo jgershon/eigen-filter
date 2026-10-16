@@ -68,7 +68,10 @@ class MutableGaussian {
         m_logDeterminant{other.m_logDeterminant},
         m_factorValid{other.m_factorValid} {}
 
-  MutableGaussian(MutableGaussian&& other)
+  /** Moving a locked object is a programmer error; if \c EIGEN_FILTER_ASSERT throws,
+   * the exception reaches this \c noexcept boundary and calls \c std::terminate.
+   */
+  MutableGaussian(MutableGaussian&& other) noexcept
       : m_moments{std::move(other.m_moments)},
         m_llt{std::move(other.m_llt)},
         m_logDeterminant{other.m_logDeterminant},
@@ -86,7 +89,7 @@ class MutableGaussian {
     return *this;
   }
 
-  MutableGaussian& operator=(MutableGaussian&& other) {
+  MutableGaussian& operator=(MutableGaussian&& other) noexcept {
     assertUnlocked();
     other.assertUnlocked();
     m_moments = std::move(other.m_moments);
