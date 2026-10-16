@@ -107,6 +107,28 @@ class KernelDensity {
     return Eigen::numext::exp(logPdf(x));
   }
 
+  /** \returns a copy of the distribution of the entries \a target given that the
+   * entries \a given equal \a values, as a MutableParticleSet storing the exact
+   * conditional bandwidth.
+   *
+   * The conditional of a Gaussian KDE is again a Gaussian KDE: each center becomes
+   * \f$ x_{a,i} + K (v - x_{b,i}) \f$, each weight gains \f$ \mathcal{N}(v; x_{b,i}, H_{bb}) \f$,
+   * and the shared bandwidth becomes \f$ H_{aa} - K H_{ba} \f$, with \f$ K = H_{ab} H_{bb}^{-1} \f$.
+   * The weights are not normalized. Building a KDE from the result with its stored
+   * bandwidth reproduces this conditional exactly; Silverman's rule would re-smooth it.
+   */
+  template <typename TargetIndices, typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
+                                 const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(m_particles, bandwidth(), target, given, values);
+  }
+
+  /** conditional() with every entry not in \a given as the target. */
+  template <typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(m_particles, bandwidth(), given, values);
+  }
+
  private:
   KernelDensity(const ParticleSetType& particles, KernelType kernel)
       : m_particles{particles}, m_kernel{std::move(kernel)} {}
@@ -114,22 +136,6 @@ class KernelDensity {
   ParticleSetType m_particles;
   KernelType m_kernel;
 };
-
-/** \returns Silverman's rule-of-thumb bandwidth
- * \f[ H = \left(\frac{4}{N_\mathrm{eff}\,(d + 2)}\right)^{2/(d+4)} \Sigma, \f]
- * where \f$ \Sigma \f$ is the particles' weighted covariance, \f$ d \f$ their
- * dimension, and \f$ N_\mathrm{eff} \f$ their effective sample size.
- *
- * Near-optimal for roughly Gaussian particle clouds; scale it down for multimodal ones.
- */
-template <typename Scalar, int Size, int MaxSize>
-[[nodiscard]] typename ParticleSet<Scalar, Size, MaxSize>::MatrixType silvermanBandwidth(
-    const ParticleSet<Scalar, Size, MaxSize>& particles) {
-  const Scalar d{Scalar(particles.particleSize())};
-  const Scalar factor{
-      Eigen::numext::pow(Scalar(4) / (particles.effectiveSampleSize() * (d + Scalar(2))), Scalar(2) / (d + Scalar(4)))};
-  return factor * particles.moments().cov();
-}
 
 /** \returns a kernel density estimate over \a particles with bandwidth \a bandwidth,
  *          or a GaussianError if \a bandwidth is not positive definite or not finite.
@@ -140,14 +146,15 @@ template <typename Scalar, int Size, int MaxSize, typename Derived>
   return KernelDensity<Scalar, Size, MaxSize>::create(particles, bandwidth);
 }
 
-/** \returns a kernel density estimate over \a particles with silvermanBandwidth(),
- *          or a GaussianError if that bandwidth is not positive definite (for
- *          example, when every particle has the same state).
+/** \returns a kernel density estimate over \a particles with their kdeBandwidth(): the
+ *          stored bandwidth if there is one, otherwise silvermanBandwidth(). Fails
+ *          with a GaussianError if that bandwidth is not positive definite (for
+ *          example, Silverman's rule when every particle has the same state).
  */
 template <typename Scalar, int Size, int MaxSize>
 [[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize>, GaussianError> kernelDensity(
     const ParticleSet<Scalar, Size, MaxSize>& particles) {
-  return kernelDensity(particles, silvermanBandwidth(particles));
+  return kernelDensity(particles, particles.kdeBandwidth());
 }
 
 /** \returns \a n draws from \a kde, one per column.

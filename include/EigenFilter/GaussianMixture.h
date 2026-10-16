@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "Gaussian.h"
+#include "Indexing.h"
 #include "Macros.h"
 #include "Moments.h"
 #include "Weights.h"
@@ -32,6 +33,48 @@ using GaussianMixtureError = std::variant<WeightError, ComponentError>;
 template <typename Scalar_, int Size_, int MaxSize_ = Size_>
 class GaussianMixture;
 
+template <typename Scalar_, int Size_, int MaxSize_>
+class MutableGaussianMixture;
+
+template <typename Source, typename Indices>
+class GaussianMixtureMarginal;
+
+namespace internal {
+
+/** Shared implementation of MutableGaussianMixture::conditional() and GaussianMixture::conditional(). */
+template <typename Source, typename TargetIndices, typename GivenIndices, typename Derived>
+[[nodiscard]] auto conditionalMixture(const Source& source, const TargetIndices& targetIndices,
+                                      const GivenIndices& givenIndices, const Eigen::MatrixBase<Derived>& values) {
+  constexpr int SourceSize{Source::SizeAtCompileTime};
+  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), targetIndices)};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), givenIndices)};
+  EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
+  using Target = std::remove_cvref_t<decltype(target)>;
+  MutableGaussianMixture<typename Source::Scalar, Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime> result{
+      target.size()};
+  result.reserve(source.size());
+  for (const auto& component : source) {
+    auto conditioned{conditionMoments(component.gaussian.mean(), component.gaussian.cov(), target, given, values)};
+    result.add(component.logWeight + conditioned.logLikelihood, std::move(conditioned.mean),
+               std::move(conditioned.cov));
+  }
+  return result;
+}
+
+/** conditionalMixture() with every entry not in \a givenIndices as the target. */
+template <typename Source, typename GivenIndices, typename Derived>
+[[nodiscard]] auto conditionalMixture(const Source& source, const GivenIndices& givenIndices,
+                                      const Eigen::MatrixBase<Derived>& values) {
+  constexpr int SourceSize{Source::SizeAtCompileTime};
+  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), givenIndices)};
+  return conditionalMixture(source, complementIndices<SourceSize, SourceMaxSize>(source.componentSize(), given), given,
+                            values);
+}
+
+}  // namespace internal
+
 /** \brief Mutable weighted sum of Gaussians that can be viewed as a GaussianMixture.
  *
  * Each component has a log-weight and a MutableGaussian. Weights need not be
@@ -47,6 +90,11 @@ class GaussianMixture;
  * locked: mutating, moving, or destroying it is a programmer error caught by
  * \c EIGEN_FILTER_ASSERT. It is also locked while forEach() and removeIf() call
  * back into user code.
+ *
+ * marginal() returns a read-only view of a subset of every component's entries.
+ * While any marginal is alive this object is borrowed: values and weights may
+ * change, but adding, removing, or resizing components, or moving or destroying
+ * this object, is a programmer error.
  *
  * \tparam Scalar_   scalar type
  * \tparam Size_     component dimension, or \c Eigen::Dynamic
@@ -66,6 +114,7 @@ class MutableGaussianMixture {
   using GaussianMixtureType = GaussianMixture<Scalar_, Size_, MaxSize_>;
   static constexpr int SizeAtCompileTime{Size_};
   static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr bool IsMutable{true};
 
   /** One weighted component. Only ever exposed as const outside the mixture. */
   struct Component {
@@ -134,10 +183,12 @@ class MutableGaussianMixture {
   MutableGaussianMixture(MutableGaussianMixture&& other) noexcept
       : m_components{std::move(other.m_components)}, m_componentSize{other.m_componentSize} {
     other.assertUnlocked();
+    other.assertUnborrowed();
   }
 
   MutableGaussianMixture& operator=(const MutableGaussianMixture& other) {
     assertUnlocked();
+    assertUnborrowed();
     m_components = other.m_components;
     m_componentSize = other.m_componentSize;
     return *this;
@@ -145,13 +196,18 @@ class MutableGaussianMixture {
 
   MutableGaussianMixture& operator=(MutableGaussianMixture&& other) noexcept {
     assertUnlocked();
+    assertUnborrowed();
     other.assertUnlocked();
+    other.assertUnborrowed();
     m_components = std::move(other.m_components);
     m_componentSize = other.m_componentSize;
     return *this;
   }
 
-  ~MutableGaussianMixture() { assertUnlocked(); }
+  ~MutableGaussianMixture() {
+    assertUnlocked();
+    assertUnborrowed();
+  }
 
   /** \returns the number of components */
   [[nodiscard]] Index size() const { return Index(m_components.size()); }
@@ -163,6 +219,7 @@ class MutableGaussianMixture {
   /** Resizes every component to dimension \a n. Component contents are unspecified afterward. */
   void resizeComponents(Index n) {
     assertUnlocked();
+    assertUnborrowed();
     assertValidComponentSize(n);
     m_componentSize = n;
     for (auto& component : m_components) component.gaussian.resize(n);
@@ -175,6 +232,7 @@ class MutableGaussianMixture {
 
   void clear() {
     assertUnlocked();
+    assertUnborrowed();
     m_components.clear();
   }
 
@@ -184,6 +242,7 @@ class MutableGaussianMixture {
   /** Appends a component. \returns an iterator to it. */
   const_iterator add(Scalar logWeight, MomentsType moments) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(moments.size() == m_componentSize);
     m_components.push_back(Component{logWeight, ComponentGaussianType{std::move(moments)}});
     return std::prev(m_components.cend());
@@ -201,6 +260,7 @@ class MutableGaussianMixture {
    */
   const_iterator remove(const_iterator pos) {
     assertUnlocked();
+    assertUnborrowed();
     const Index i{indexOf(pos)};
     removeAt(i);
     return m_components.cbegin() + i;
@@ -254,6 +314,7 @@ class MutableGaussianMixture {
   template <std::ranges::input_range R>
   void assign(R&& components) {
     assertUnlocked();
+    assertUnborrowed();
     m_components.clear();
     if constexpr (std::ranges::sized_range<R>) m_components.reserve(std::ranges::size(components));
     for (auto&& [logWeight, moments] : components) add(logWeight, moments);
@@ -262,6 +323,7 @@ class MutableGaussianMixture {
   /** Appends copies of \a other's components, which must have the same dimension. */
   void append(const MutableGaussianMixture& other) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(other.m_componentSize == m_componentSize);
     const std::size_t n{other.m_components.size()};
     m_components.reserve(m_components.size() + n);
@@ -297,6 +359,7 @@ class MutableGaussianMixture {
    */
   const_iterator merge(const_iterator keep, const_iterator absorb, const MomentsType& moments) {
     assertUnlocked();
+    assertUnborrowed();
     const Index k{indexOf(keep)};
     const Index a{indexOf(absorb)};
     EIGEN_FILTER_ASSERT(k != a && "cannot merge a component with itself");
@@ -320,6 +383,7 @@ class MutableGaussianMixture {
   template <std::ranges::forward_range R>
   void split(const_iterator pos, R&& children) {
     assertUnlocked();
+    assertUnborrowed();
     const Index i{indexOf(pos)};
     EIGEN_FILTER_ASSERT(!std::ranges::empty(children));
     internal::LogSumExp<Scalar> relativeTotal;
@@ -348,6 +412,7 @@ class MutableGaussianMixture {
   template <bool ReturnRemovedWeight = false, typename Pred>
   RemovalResult<ReturnRemovedWeight> removeIf(Pred pred) {
     assertUnlocked();
+    assertUnborrowed();
     const auto removeAtIndex{[&](Index i) { return static_cast<bool>(std::invoke(pred, std::as_const(at(i)))); }};
     if constexpr (ReturnRemovedWeight) {
       const auto total{logTotalWeight()};
@@ -367,6 +432,7 @@ class MutableGaussianMixture {
   template <bool ReturnRemovedWeight = false>
   RemovalResult<ReturnRemovedWeight> truncate(Index maxSize) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(maxSize >= 0);
     [[maybe_unused]] Scalar logTotal{0};
     if constexpr (ReturnRemovedWeight) {
@@ -394,6 +460,7 @@ class MutableGaussianMixture {
    */
   [[nodiscard]] std::expected<Scalar, WeightError> removeLightest(Scalar maxLogFraction) {
     assertUnlocked();
+    assertUnborrowed();
     const auto total{logTotalWeight()};
     if (!total) return std::unexpected{total.error()};
     std::vector<Index> order{indicesByWeight()};
@@ -409,6 +476,37 @@ class MutableGaussianMixture {
     }
     compact([&](Index i) { return bool{drop[std::size_t(i)]}; });
     return removed.value() - *total;
+  }
+
+  /** \returns a read-only view of the entries \a indices of every component; see
+   * MutableGaussian::marginal() for the index types accepted. While the marginal is
+   * alive this object is borrowed.
+   *
+   * \sa class GaussianMixtureMarginal
+   */
+  template <typename Indices>
+  [[nodiscard]] GaussianMixtureMarginal<MutableGaussianMixture, Indices> marginal(const Indices& indices) const {
+    return GaussianMixtureMarginal<MutableGaussianMixture, Indices>{*this, indices};
+  }
+
+  /** \returns a copy of the distribution of the entries \a target given that the
+   * entries \a given equal \a values.
+   *
+   * Each component is conditioned as in MutableGaussian::conditional(), and its
+   * log-weight gains the log-likelihood of \a values under that component's marginal.
+   * The weights are not normalized, so the result's total weight is this mixture's
+   * total weight times the marginal density of \a values. Always produces a result.
+   */
+  template <typename TargetIndices, typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
+                                 const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalMixture(*this, target, given, values);
+  }
+
+  /** conditional() with every entry not in \a given as the target. */
+  template <typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalMixture(*this, given, values);
   }
 
   /** Validates the weights and factorizes every component whose covariance has changed.
@@ -446,6 +544,8 @@ class MutableGaussianMixture {
 
  private:
   friend GaussianMixtureType;
+  template <typename>
+  friend class internal::Borrow;
 
   class ScopedLock {
    public:
@@ -469,6 +569,10 @@ class MutableGaussianMixture {
   }
 
   void assertUnlocked() const { EIGEN_FILTER_ASSERT(m_lockCount == 0 && "MutableGaussianMixture is locked"); }
+
+  void assertUnborrowed() const {
+    EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "MutableGaussianMixture is borrowed by a live marginal");
+  }
 
   [[nodiscard]] Index indexOf(const_iterator pos) const {
     const Index i{pos - m_components.cbegin()};
@@ -531,6 +635,7 @@ class MutableGaussianMixture {
   // Filled by the const factorize() for use by views.
   mutable Scalar m_logTotalWeight{};
   mutable int m_lockCount{0};
+  mutable int m_borrowCount{0};
 };
 
 /** \brief Read-only view of a MutableGaussianMixture whose components have been factorized.
@@ -557,6 +662,7 @@ class GaussianMixture {
   using MatrixType = typename MutableType::MatrixType;
   static constexpr int SizeAtCompileTime{Size_};
   static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr bool IsMutable{false};
 
   GaussianMixture(const GaussianMixture& other) : m_source{other.m_source} { lock(); }
   GaussianMixture(GaussianMixture&& other) noexcept : m_source{std::exchange(other.m_source, nullptr)} {}
@@ -651,6 +757,27 @@ class GaussianMixture {
     return Eigen::numext::exp(logPdf(x));
   }
 
+  /** \returns a read-only view of the entries \a indices of every component. It holds
+   * a copy of this view, so the source stays locked while the marginal is alive.
+   */
+  template <typename Indices>
+  [[nodiscard]] GaussianMixtureMarginal<GaussianMixture, Indices> marginal(const Indices& indices) const {
+    return GaussianMixtureMarginal<GaussianMixture, Indices>{*this, indices};
+  }
+
+  /** \returns a copy of the conditional distribution; see MutableGaussianMixture::conditional(). */
+  template <typename TargetIndices, typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
+                                 const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalMixture(*this, target, given, values);
+  }
+
+  /** conditional() with every entry not in \a given as the target. */
+  template <typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalMixture(*this, given, values);
+  }
+
  private:
   friend MutableType;
 
@@ -674,6 +801,72 @@ class GaussianMixture {
   }
 
   const MutableType* m_source;
+};
+
+/** \brief Read-only view of a subset of the entries of every component of a
+ * MutableGaussianMixture or GaussianMixture.
+ *
+ * Obtained from marginal(). From a MutableGaussianMixture it borrows the source;
+ * from a GaussianMixture it holds a copy of the view, and so the lock. Weights are
+ * those of the source. Component covariances read only the source's lower triangle.
+ *
+ * \tparam Source   MutableGaussianMixture or GaussianMixture
+ * \tparam Indices  the index type passed to marginal()
+ */
+template <typename Source, typename Indices>
+class GaussianMixtureMarginal {
+  using Selection = internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>;
+
+ public:
+  using Scalar = typename Source::Scalar;
+  using Index = Eigen::Index;
+  static constexpr int SizeAtCompileTime{Selection::size};
+  static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
+  using MutableType = MutableGaussianMixture<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime>;
+  using MomentsType = typename MutableType::MomentsType;
+  using IndexVectorType = typename Selection::type;
+
+  GaussianMixtureMarginal(const Source& source, const Indices& indices)
+      : m_holder{source},
+        m_indices{internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(
+            source.componentSize(), indices)} {
+    EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
+  }
+
+  /** \returns the number of components */
+  [[nodiscard]] Index size() const { return source().size(); }
+
+  /** \returns the dimension of every marginal component */
+  [[nodiscard]] Index componentSize() const { return m_indices.size(); }
+
+  /** \returns the source entries this marginal selects */
+  [[nodiscard]] const IndexVectorType& indices() const { return m_indices; }
+
+  [[nodiscard]] Scalar logWeight(Index i) const { return component(i).logWeight; }
+  [[nodiscard]] auto mean(Index i) const { return component(i).gaussian.mean()(m_indices); }
+  [[nodiscard]] auto cov(Index i) const {
+    return internal::lowerSymmetricBlock(component(i).gaussian.cov(), m_indices, m_indices);
+  }
+  [[nodiscard]] MomentsType moments(Index i) const { return MomentsType{mean(i), cov(i)}; }
+
+  /** \returns an independent MutableGaussianMixture holding this marginal, with the source's weights */
+  [[nodiscard]] MutableType copy() const {
+    MutableType result{componentSize()};
+    result.reserve(size());
+    for (Index i{0}; i < size(); ++i) result.add(logWeight(i), moments(i));
+    return result;
+  }
+
+ private:
+  [[nodiscard]] const Source& source() const { return m_holder.get(); }
+
+  [[nodiscard]] const auto& component(Index i) const {
+    EIGEN_FILTER_ASSERT(i >= 0 && i < size() && "component index out of range");
+    return *(source().begin() + i);
+  }
+
+  internal::HolderFor<Source> m_holder;
+  IndexVectorType m_indices;
 };
 
 }  // namespace EigenFilter
