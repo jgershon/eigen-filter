@@ -15,10 +15,12 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 
 add_executable(eigen_filter_tests
-  smoke_test.cpp
+  smoke.cpp
+  moments.cpp
+  gaussian.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
-  eigen_filter::eigen_filter
+  EigenFilter::EigenFilter
   GTest::gtest_main
 )
 target_compile_options(eigen_filter_tests PRIVATE
