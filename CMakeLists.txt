@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(eigen_filter
+project(EigenFilter
   VERSION 0.1.0
   DESCRIPTION "State estimation utilities in C++23 using Eigen"
   LANGUAGES CXX
 )
 
-option(EIGEN_FILTER_BUILD_TESTS "Build eigen_filter unit tests" ${PROJECT_IS_TOP_LEVEL})
+option(EIGEN_FILTER_BUILD_TESTS "Build EigenFilter unit tests" ${PROJECT_IS_TOP_LEVEL})
 
 # Only set global language settings when we're the top-level project; when
 # consumed via FetchContent, the C++23 requirement propagates through the target.
@@ -44,14 +44,14 @@ FetchContent_Declare(Eigen3
 FetchContent_MakeAvailable(Eigen3)
 
 # --- Library ----------------------------------------------------------------
-add_library(eigen_filter INTERFACE)
-add_library(eigen_filter::eigen_filter ALIAS eigen_filter)
+add_library(EigenFilter INTERFACE)
+add_library(EigenFilter::EigenFilter ALIAS EigenFilter)
 
-target_include_directories(eigen_filter INTERFACE
+target_include_directories(EigenFilter INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_compile_features(eigen_filter INTERFACE cxx_std_23)
-target_link_libraries(eigen_filter INTERFACE Eigen3::Eigen)
+target_compile_features(EigenFilter INTERFACE cxx_std_23)
+target_link_libraries(EigenFilter INTERFACE Eigen3::Eigen)
 
 # --- Tests ------------------------------------------------------------------
 if(EIGEN_FILTER_BUILD_TESTS)
