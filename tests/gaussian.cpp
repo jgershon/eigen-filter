@@ -9,7 +9,6 @@
 #include <memory>
 #include <numbers>
 #include <optional>
-#include <tuple>
 
 using EigenFilter::GaussianError;
 using EigenFilter::MutableGaussian;
@@ -91,7 +90,9 @@ TYPED_TEST(GaussianTest, ReadsOnlyLowerTriangle) {
   const auto x{this->makeVector(0.7)};
   const auto expected{mg.toGaussian()->logPdf(x)};
 
-  mg.mutableCov().template triangularView<Eigen::StrictlyUpper>().setConstant(12345);
+  auto cov{mg.cov()};
+  cov.template triangularView<Eigen::StrictlyUpper>().setConstant(12345);
+  mg.setCov(cov);
   EXPECT_EQ(mg.toGaussian()->logPdf(x), expected);
 }
 
@@ -110,7 +111,7 @@ TYPED_TEST(GaussianTest, CovChangeRefactorizes) {
   auto mg{this->make()};
   const auto logDet{mg.toGaussian()->logDeterminant()};
 
-  mg.mutableCov() *= Scalar(4);
+  mg.setCov(mg.cov() * Scalar(4));
   const auto expected{logDet + Scalar(this->n) * std::log(Scalar(4))};
   EXPECT_NEAR(mg.toGaussian()->logDeterminant(), expected, this->tolerance() * 10);
 }
@@ -127,7 +128,9 @@ TYPED_TEST(GaussianTest, NotPositiveDefinite) {
 TYPED_TEST(GaussianTest, NonFinite) {
   using Scalar = typename TestFixture::Scalar;
   auto mg{this->make()};
-  mg.mutableCov()(this->n - 1, 0) = std::numeric_limits<Scalar>::quiet_NaN();
+  auto cov{mg.cov()};
+  cov(this->n - 1, 0) = std::numeric_limits<Scalar>::quiet_NaN();
+  mg.setCov(cov);
   const auto g{mg.toGaussian()};
   ASSERT_FALSE(g.has_value());
   EXPECT_EQ(g.error(), GaussianError::NonFinite);
@@ -161,7 +164,7 @@ TYPED_TEST(GaussianTest, LockReleasedWhenViewsDie) {
     auto copy{*g};
     auto moved{std::move(*g)};
   }
-  std::ignore = mg.mutableCov();  // would assert if any lock leaked
+  mg.setCov(mg.cov());  // would assert if any lock leaked
   mg.resize(this->n);
 }
 
@@ -169,7 +172,7 @@ TYPED_TEST(GaussianTest, CopyOfLockedSourceIsUnlocked) {
   auto mg{this->make()};
   const auto g{mg.toGaussian()};
   auto copy{mg};
-  std::ignore = copy.mutableCov();  // would assert if the lock were copied
+  copy.setCov(copy.cov());  // would assert if the lock were copied
   EXPECT_EQ(copy.toGaussian()->logPeak(), g->logPeak());
 }
 
@@ -200,8 +203,8 @@ class GaussianDeathTest : public ::testing::Test {
 TEST_F(GaussianDeathTest, MutateWhileLocked) {
   auto mg{make()};
   const auto g{mg.toGaussian()};
-  EXPECT_DEATH(std::ignore = mg.mutableCov(), "locked");
-  EXPECT_DEATH(std::ignore = mg.mutableMean(), "locked");
+  EXPECT_DEATH(mg.setCov(Eigen::Matrix2d::Identity()), "locked");
+  EXPECT_DEATH(mg.setMean(Eigen::Vector2d::Zero()), "locked");
   EXPECT_DEATH(mg.resize(2), "locked");
 }
 
@@ -212,7 +215,7 @@ TEST_F(GaussianDeathTest, CopyOfViewKeepsLock) {
     const auto g{mg.toGaussian()};
     copy.emplace(*g);
   }
-  EXPECT_DEATH(std::ignore = mg.mutableCov(), "locked");
+  EXPECT_DEATH(mg.setCov(Eigen::Matrix2d::Identity()), "locked");
 }
 
 TEST_F(GaussianDeathTest, MoveWhileLocked) {
