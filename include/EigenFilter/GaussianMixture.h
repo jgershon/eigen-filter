@@ -4,6 +4,8 @@
 #include <expected>
 #include <functional>
 #include <iterator>
+#include <random>
+#include <span>
 #include <numeric>
 #include <ranges>
 #include <type_traits>
@@ -15,6 +17,9 @@
 #include "Indexing.h"
 #include "Macros.h"
 #include "Moments.h"
+#include "Resampling.h"
+#include "SampleSet.h"
+#include "Sampling.h"
 #include "Weights.h"
 
 namespace EigenFilter {
@@ -868,5 +873,59 @@ class GaussianMixtureMarginal {
   internal::HolderFor<Source> m_holder;
   IndexVectorType m_indices;
 };
+
+/** \returns \a n draws from \a mixture, one per column.
+ *
+ * Each draw picks a component in proportion to its weight using \a resampler, then
+ * draws \f$ \mu_c + L_c z \f$ from it, with \f$ z \sim \mathcal{N}(0, I) \f$ and
+ * \f$ \Sigma_c = L_c L_c^T \f$. The default MultinomialResampler makes the draws
+ * independent; a lower-variance resampler such as SystematicResampler gives each
+ * component a count closer to its expected share.
+ *
+ * \sa drawSamplesWithLogPdf(const GaussianMixture&, Eigen::Index, G&, const R&), \ref Resamplers
+ */
+template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_generator G,
+          typename R = MultinomialResampler>
+  requires Resampler<R, Scalar, G>
+[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const GaussianMixture<Scalar, Size, MaxSize>& mixture,
+                                                           Eigen::Index n, G& rng, const R& resampler = {}) {
+  EIGEN_FILTER_ASSERT(n >= 0);
+  using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
+  std::vector<Scalar> weights;
+  weights.reserve(std::size_t(mixture.size()));
+  for (const auto& component : mixture) {
+    weights.push_back(Eigen::numext::exp(component.logWeight - mixture.logTotalWeight()));
+  }
+  std::vector<Eigen::Index> ancestors(static_cast<std::size_t>(n));
+  resampler(std::span<const Scalar>{weights}, std::span<Eigen::Index>{ancestors}, rng);
+
+  const SampleSetType noise{internal::standardNormal<SampleSetType>(mixture.componentSize(), n, rng)};
+  SampleSetType samples{mixture.componentSize(), n};
+  for (Eigen::Index j{0}; j < n; ++j) {
+    const auto gaussian{(mixture.begin() + ancestors[std::size_t(j)])->gaussian.toGaussian()};
+    samples.col(j) = gaussian->mean() + gaussian->llt().matrixL() * noise.col(j);
+  }
+  return samples;
+}
+
+/** \returns \a n draws from \a mixture, one per column, with the log-density of
+ * \a mixture at each.
+ *
+ * Draws exactly as drawSamples() does. Each log-density is a full
+ * GaussianMixture::logPdf() evaluation, so the total is
+ * \f$ O(n \cdot \mathrm{size}() \cdot d^2) \f$.
+ *
+ * \sa drawSamples(const GaussianMixture&, Eigen::Index, G&, const R&)
+ */
+template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_generator G,
+          typename R = MultinomialResampler>
+  requires Resampler<R, Scalar, G>
+[[nodiscard]] SamplesWithLogPdf<Scalar, Size, MaxSize> drawSamplesWithLogPdf(
+    const GaussianMixture<Scalar, Size, MaxSize>& mixture, Eigen::Index n, G& rng, const R& resampler = {}) {
+  SamplesWithLogPdf<Scalar, Size, MaxSize> result{drawSamples(mixture, n, rng, resampler), {}};
+  result.logPdf.resize(n);
+  for (Eigen::Index j{0}; j < n; ++j) result.logPdf(j) = mixture.logPdf(result.samples.col(j));
+  return result;
+}
 
 }  // namespace EigenFilter
