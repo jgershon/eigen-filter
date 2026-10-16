@@ -16,8 +16,8 @@ static_assert(EIGEN_VERSION_AT_LEAST(5, 0, 0), "EigenFilter requires Eigen 5.0 o
 
 namespace EigenFilter {
 
-inline constexpr int versionMajor = 0;
-inline constexpr int versionMinor = 1;
-inline constexpr int versionPatch = 0;
+inline constexpr int versionMajor{0};
+inline constexpr int versionMinor{1};
+inline constexpr int versionPatch{0};
 
 }  // namespace EigenFilter
