@@ -20,8 +20,8 @@ class Moments {
  public:
   using Scalar = Scalar_;
   using Index = Eigen::Index;
-  static constexpr int SizeAtCompileTime = Size_;
-  static constexpr int MaxSizeAtCompileTime = MaxSize_;
+  static constexpr int SizeAtCompileTime{Size_};
+  static constexpr int MaxSizeAtCompileTime{MaxSize_};
 
   using VectorType = Eigen::Matrix<Scalar, Size_, 1, Eigen::ColMajor, MaxSize_, 1>;
   using MatrixType = Eigen::Matrix<Scalar, Size_, Size_, Eigen::ColMajor, MaxSize_, MaxSize_>;
@@ -33,11 +33,11 @@ class Moments {
 
   template <typename MeanDerived, typename CovDerived>
   Moments(const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
-      : m_mean(mean), m_cov(cov) {
+      : m_mean{mean}, m_cov{cov} {
     EIGEN_FILTER_ASSERT(m_cov.rows() == m_mean.size() && m_cov.cols() == m_mean.size());
   }
 
-  Index size() const { return m_mean.size(); }
+  [[nodiscard]] Index size() const { return m_mean.size(); }
 
   /** Resizes mean and covariance to dimension \a n. Contents are unspecified afterward. */
   void resize(Index n) {
@@ -45,10 +45,10 @@ class Moments {
     m_cov.resize(n, n);
   }
 
-  const VectorType& mean() const { return m_mean; }
-  const MatrixType& cov() const { return m_cov; }
-  VectorType& mean() { return m_mean; }
-  MatrixType& cov() { return m_cov; }
+  [[nodiscard]] const VectorType& mean() const { return m_mean; }
+  [[nodiscard]] const MatrixType& cov() const { return m_cov; }
+  [[nodiscard]] VectorType& mean() { return m_mean; }
+  [[nodiscard]] MatrixType& cov() { return m_cov; }
 
  private:
   VectorType m_mean;

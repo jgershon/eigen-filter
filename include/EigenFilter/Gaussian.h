@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cmath>
 #include <expected>
 #include <utility>
 
@@ -48,32 +47,32 @@ class MutableGaussian {
   using VectorType = typename MomentsType::VectorType;
   using MatrixType = typename MomentsType::MatrixType;
   using GaussianType = Gaussian<Scalar_, Size_, MaxSize_>;
-  static constexpr int SizeAtCompileTime = Size_;
-  static constexpr int MaxSizeAtCompileTime = MaxSize_;
+  static constexpr int SizeAtCompileTime{Size_};
+  static constexpr int MaxSizeAtCompileTime{MaxSize_};
 
   MutableGaussian() = default;
 
   /** Constructs a Gaussian of dimension \a n with uninitialized contents. */
-  explicit MutableGaussian(Index n) : m_moments(n) {}
+  explicit MutableGaussian(Index n) : m_moments{n} {}
 
-  explicit MutableGaussian(MomentsType moments) : m_moments(std::move(moments)) {}
+  explicit MutableGaussian(MomentsType moments) : m_moments{std::move(moments)} {}
 
   template <typename MeanDerived, typename CovDerived>
   MutableGaussian(const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
-      : m_moments(mean, cov) {}
+      : m_moments{mean, cov} {}
 
   /** Copies the data and any valid factorization. The copy starts unlocked. */
   MutableGaussian(const MutableGaussian& other)
-      : m_moments(other.m_moments),
-        m_llt(other.m_llt),
-        m_logDeterminant(other.m_logDeterminant),
-        m_factorValid(other.m_factorValid) {}
+      : m_moments{other.m_moments},
+        m_llt{other.m_llt},
+        m_logDeterminant{other.m_logDeterminant},
+        m_factorValid{other.m_factorValid} {}
 
   MutableGaussian(MutableGaussian&& other)
-      : m_moments(std::move(other.m_moments)),
-        m_llt(std::move(other.m_llt)),
-        m_logDeterminant(other.m_logDeterminant),
-        m_factorValid(other.m_factorValid) {
+      : m_moments{std::move(other.m_moments)},
+        m_llt{std::move(other.m_llt)},
+        m_logDeterminant{other.m_logDeterminant},
+        m_factorValid{other.m_factorValid} {
     other.assertUnlocked();
     other.m_factorValid = false;
   }
@@ -100,7 +99,7 @@ class MutableGaussian {
 
   ~MutableGaussian() { assertUnlocked(); }
 
-  Index size() const { return m_moments.size(); }
+  [[nodiscard]] Index size() const { return m_moments.size(); }
 
   /** Resizes mean, covariance, and factorization. Contents are unspecified afterward. */
   void resize(Index n) {
@@ -109,15 +108,15 @@ class MutableGaussian {
     m_factorValid = false;
   }
 
-  const MomentsType& moments() const { return m_moments; }
-  const VectorType& mean() const { return m_moments.mean(); }
-  const MatrixType& cov() const { return m_moments.cov(); }
+  [[nodiscard]] const MomentsType& moments() const { return m_moments; }
+  [[nodiscard]] const VectorType& mean() const { return m_moments.mean(); }
+  [[nodiscard]] const MatrixType& cov() const { return m_moments.cov(); }
 
   /** \returns a writable reference to the mean. Do not resize through this reference.
    *
    * \sa setMean()
    */
-  VectorType& mutableMean() {
+  [[nodiscard]] VectorType& mutableMean() {
     assertUnlocked();
     return m_moments.mean();
   }
@@ -127,7 +126,7 @@ class MutableGaussian {
    *
    * \sa setCov()
    */
-  MatrixType& mutableCov() {
+  [[nodiscard]] MatrixType& mutableCov() {
     assertUnlocked();
     m_factorValid = false;
     return m_moments.cov();
@@ -147,24 +146,38 @@ class MutableGaussian {
 
   /** Factorizes the covariance if it has changed since the last factorization.
    *
+   * Calling this ahead of time moves the cost of factorization out of a later
+   * toGaussian() call. Does not lock this object.
+   *
+   * \returns nothing on success, or a GaussianError if the covariance is not
+   *          positive definite or not finite.
+   *
+   * \sa toGaussian(), GaussianError
+   */
+  [[nodiscard]] std::expected<void, GaussianError> factorize() const {
+    if (m_factorValid) return {};
+    m_llt.compute(m_moments.cov());
+    if (m_llt.info() != Eigen::Success) return std::unexpected{GaussianError::NotPositiveDefinite};
+    // NaN slips through LLT's positivity test but always reaches the diagonal of
+    // L, so checking the log-determinant catches any non-finite lower-triangle input.
+    const Scalar logDet{Scalar(2) * m_llt.matrixLLT().diagonal().array().log().sum()};
+    if (!Eigen::numext::isfinite(logDet)) return std::unexpected{GaussianError::NonFinite};
+    m_logDeterminant = logDet;
+    m_factorValid = true;
+    return {};
+  }
+
+  /** Factorizes the covariance if needed (see factorize()).
+   *
    * \returns a Gaussian view that locks this object for its lifetime, or a
    *          GaussianError if the covariance is not positive definite or not finite.
    *
-   * \sa class Gaussian, GaussianError
+   * \sa factorize(), class Gaussian, GaussianError
    */
+  [[nodiscard("the Gaussian view holds the lock; discarding it releases the lock immediately")]]
   std::expected<GaussianType, GaussianError> toGaussian() const {
-    if (!m_factorValid) {
-      m_llt.compute(m_moments.cov());
-      if (m_llt.info() != Eigen::Success) return std::unexpected(GaussianError::NotPositiveDefinite);
-      // NaN slips through LLT's positivity test but always reaches the diagonal of
-      // L, so checking the log-determinant catches any non-finite lower-triangle input.
-      using std::isfinite;
-      const Scalar logDet = Scalar(2) * m_llt.matrixLLT().diagonal().array().log().sum();
-      if (!isfinite(logDet)) return std::unexpected(GaussianError::NonFinite);
-      m_logDeterminant = logDet;
-      m_factorValid = true;
-    }
-    return GaussianType(this);
+    if (auto result{factorize()}; !result) return std::unexpected{result.error()};
+    return GaussianType{this};
   }
 
  private:
@@ -175,11 +188,11 @@ class MutableGaussian {
   }
 
   MomentsType m_moments;
-  // Factorization cache, filled lazily by the const toGaussian().
+  // Factorization cache, filled lazily by the const factorize().
   mutable Eigen::LLT<MatrixType> m_llt;
   mutable Scalar m_logDeterminant{};
-  mutable bool m_factorValid = false;
-  mutable int m_lockCount = 0;
+  mutable bool m_factorValid{false};
+  mutable int m_lockCount{0};
 };
 
 /** \brief Read-only view of a MutableGaussian whose covariance has been factorized.
@@ -203,11 +216,11 @@ class Gaussian {
   using VectorType = typename MutableType::VectorType;
   using MatrixType = typename MutableType::MatrixType;
   using LLTType = Eigen::LLT<MatrixType>;
-  static constexpr int SizeAtCompileTime = Size_;
-  static constexpr int MaxSizeAtCompileTime = MaxSize_;
+  static constexpr int SizeAtCompileTime{Size_};
+  static constexpr int MaxSizeAtCompileTime{MaxSize_};
 
-  Gaussian(const Gaussian& other) : m_source(other.m_source) { lock(); }
-  Gaussian(Gaussian&& other) noexcept : m_source(std::exchange(other.m_source, nullptr)) {}
+  Gaussian(const Gaussian& other) : m_source{other.m_source} { lock(); }
+  Gaussian(Gaussian&& other) noexcept : m_source{std::exchange(other.m_source, nullptr)} {}
 
   Gaussian& operator=(const Gaussian& other) {
     if (this != &other) {
@@ -228,24 +241,23 @@ class Gaussian {
 
   ~Gaussian() { unlock(); }
 
-  Index size() const { return source().size(); }
-  const MomentsType& moments() const { return source().moments(); }
-  const VectorType& mean() const { return source().mean(); }
-  const MatrixType& cov() const { return source().cov(); }
+  [[nodiscard]] Index size() const { return source().size(); }
+  [[nodiscard]] const MomentsType& moments() const { return source().moments(); }
+  [[nodiscard]] const VectorType& mean() const { return source().mean(); }
+  [[nodiscard]] const MatrixType& cov() const { return source().cov(); }
 
   /** \returns the Cholesky factorization \f$ \Sigma = L L^T \f$ of the covariance */
-  const LLTType& llt() const { return source().m_llt; }
+  [[nodiscard]] const LLTType& llt() const { return source().m_llt; }
 
   /** \returns the log-determinant \f$ \log|\Sigma| \f$ of the covariance */
-  Scalar logDeterminant() const { return source().m_logDeterminant; }
+  [[nodiscard]] Scalar logDeterminant() const { return source().m_logDeterminant; }
 
   /** \returns the log of the density at the mean, \f$ -\frac{1}{2}(n \log 2\pi + \log|\Sigma|) \f$
    *
    * \sa logPdf()
    */
-  Scalar logPeak() const {
-    using std::log;
-    const Scalar log2Pi = log(Scalar(2) * Scalar(EIGEN_PI));
+  [[nodiscard]] Scalar logPeak() const {
+    const Scalar log2Pi{Eigen::numext::log(Scalar(2) * Scalar(EIGEN_PI))};
     return Scalar(-0.5) * (Scalar(size()) * log2Pi + logDeterminant());
   }
 
@@ -255,10 +267,10 @@ class Gaussian {
    * \sa logPdf()
    */
   template <typename Derived>
-  Scalar wsse(const Eigen::MatrixBase<Derived>& x) const {
+  [[nodiscard]] Scalar wsse(const Eigen::MatrixBase<Derived>& x) const {
     static_assert(Derived::IsVectorAtCompileTime, "wsse() expects a vector");
     EIGEN_FILTER_ASSERT(x.size() == size());
-    VectorType residual = x - mean();
+    VectorType residual{x - mean()};
     llt().matrixL().solveInPlace(residual);
     return residual.squaredNorm();
   }
@@ -268,7 +280,7 @@ class Gaussian {
    * \sa logPeak(), wsse(), pdf()
    */
   template <typename Derived>
-  Scalar logPdf(const Eigen::MatrixBase<Derived>& x) const {
+  [[nodiscard]] Scalar logPdf(const Eigen::MatrixBase<Derived>& x) const {
     return logPeak() - Scalar(0.5) * wsse(x);
   }
 
@@ -279,17 +291,16 @@ class Gaussian {
    * \sa logPdf()
    */
   template <typename Derived>
-  Scalar pdf(const Eigen::MatrixBase<Derived>& x) const {
-    using std::exp;
-    return exp(logPdf(x));
+  [[nodiscard]] Scalar pdf(const Eigen::MatrixBase<Derived>& x) const {
+    return Eigen::numext::exp(logPdf(x));
   }
 
  private:
   friend MutableType;
 
-  explicit Gaussian(const MutableType* source) : m_source(source) { lock(); }
+  explicit Gaussian(const MutableType* source) : m_source{source} { lock(); }
 
-  const MutableType& source() const {
+  [[nodiscard]] const MutableType& source() const {
     EIGEN_FILTER_ASSERT(m_source && "use of a moved-from Gaussian");
     return *m_source;
   }

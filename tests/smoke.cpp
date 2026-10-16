@@ -10,7 +10,7 @@ TEST(Smoke, EigenIsVersion5) {
 }
 
 TEST(Smoke, EigenWorks) {
-  const Eigen::Matrix2d a = Eigen::Matrix2d::Identity();
-  const Eigen::Vector2d x(1.0, 2.0);
+  const Eigen::Matrix2d a{Eigen::Matrix2d::Identity()};
+  const Eigen::Vector2d x{1.0, 2.0};
   EXPECT_TRUE((a * x).isApprox(x));
 }
