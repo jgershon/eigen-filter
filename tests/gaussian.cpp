@@ -9,11 +9,16 @@
 #include <memory>
 #include <numbers>
 #include <optional>
+#include <type_traits>
 
 using EigenFilter::GaussianError;
 using EigenFilter::MutableGaussian;
 
 namespace {
+
+// Lets std::vector move rather than copy on reallocation.
+static_assert(std::is_nothrow_move_constructible_v<MutableGaussian<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<MutableGaussian<double, 3>>);
 
 // Each config names a MutableGaussian type and the runtime dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>

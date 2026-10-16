@@ -18,13 +18,14 @@ add_executable(eigen_filter_tests
   smoke.cpp
   moments.cpp
   gaussian.cpp
+  gaussian_mixture.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter
   GTest::gtest_main
 )
 target_compile_options(eigen_filter_tests PRIVATE
-  $<IF:$<CXX_COMPILER_ID:MSVC>,/W4 /permissive- /Zc:__cplusplus,-Wall -Wextra -Wpedantic>
+  $<IF:$<CXX_COMPILER_ID:MSVC>,/W4 /permissive- /Zc:__cplusplus /bigobj,-Wall -Wextra -Wpedantic>
 )
 
 gtest_discover_tests(eigen_filter_tests)
