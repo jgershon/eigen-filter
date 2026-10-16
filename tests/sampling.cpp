@@ -1,0 +1,111 @@
+#include <EigenFilter/ParticleSet.h>
+#include <EigenFilter/Sampling.h>
+
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <random>
+#include <type_traits>
+
+using EigenFilter::MutableGaussian;
+
+namespace {
+
+// Each config names a MutableGaussian type and the dimension to test it at.
+template <typename Scalar, int Size, int MaxSize, int N>
+struct Config {
+  using Type = MutableGaussian<Scalar, Size, MaxSize>;
+  static constexpr Eigen::Index n{N};
+};
+
+using Configs = ::testing::Types<Config<double, 1, 1, 1>, Config<double, 3, 3, 3>,
+                                 Config<double, Eigen::Dynamic, Eigen::Dynamic, 5>,
+                                 Config<double, Eigen::Dynamic, 6, 4>, Config<float, 2, 2, 2>>;
+
+template <typename C>
+class SamplingTest : public ::testing::Test {
+ protected:
+  using MG = typename C::Type;
+  using Scalar = typename MG::Scalar;
+  using VectorType = typename MG::VectorType;
+  using MatrixType = typename MG::MatrixType;
+  static constexpr Eigen::Index n{C::n};
+
+  // Deterministic symmetric positive definite matrix: A·Aᵀ + I.
+  static MatrixType makeSpd() {
+    const MatrixType a{MatrixType::NullaryExpr(
+        n, n, [](Eigen::Index i, Eigen::Index j) { return Scalar(std::sin(7.0 * i + 3.0 * j + 1.0)); })};
+    MatrixType p{a * a.transpose()};
+    p.diagonal().array() += Scalar(1);
+    return p;
+  }
+
+  static MG make() {
+    return MG{VectorType::NullaryExpr(n, [](Eigen::Index i) { return Scalar(1.0 + double(i)); }), makeSpd()};
+  }
+};
+
+}  // namespace
+
+TYPED_TEST_SUITE(SamplingTest, Configs);
+
+TYPED_TEST(SamplingTest, SampleMomentsConverge) {
+  const auto mg{this->make()};
+  const auto g{mg.toGaussian()};
+  ASSERT_TRUE(g.has_value());
+  std::mt19937_64 rng{7};
+  constexpr Eigen::Index count{40000};
+  const auto samples{EigenFilter::drawSamples(*g, count, rng)};
+  ASSERT_EQ(samples.rows(), this->n);
+  ASSERT_EQ(samples.cols(), count);
+
+  const Eigen::MatrixXd x{samples.template cast<double>()};
+  const Eigen::VectorXd mean{x.rowwise().mean()};
+  const Eigen::MatrixXd centered{x.colwise() - mean};
+  const Eigen::MatrixXd cov{centered * centered.transpose() / double(count - 1)};
+  const Eigen::MatrixXd p{mg.cov().template cast<double>()};
+  for (Eigen::Index i{0}; i < this->n; ++i) {
+    EXPECT_NEAR(mean(i), double(mg.mean()(i)), 5 * std::sqrt(p(i, i) / double(count))) << "mean " << i;
+  }
+  EXPECT_LT((cov - p).norm(), 0.05 * p.norm());
+}
+
+TYPED_TEST(SamplingTest, LogPdfMatchesGaussian) {
+  using Scalar = typename TestFixture::Scalar;
+  const auto mg{this->make()};
+  const auto g{mg.toGaussian()};
+  std::mt19937_64 rng{11};
+  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*g, 50, rng)};
+  ASSERT_EQ(drawn.logPdf.size(), 50);
+  const Scalar tolerance{std::is_same_v<Scalar, float> ? Scalar(1e-4) : Scalar(1e-10)};
+  for (Eigen::Index i{0}; i < 50; ++i) {
+    const Scalar expected{g->logPdf(drawn.samples.col(i))};
+    EXPECT_NEAR(drawn.logPdf(i), expected, tolerance * std::abs(expected)) << "sample " << i;
+  }
+}
+
+TYPED_TEST(SamplingTest, BothVersionsDrawTheSameSamples) {
+  const auto mg{this->make()};
+  const auto g{mg.toGaussian()};
+  std::mt19937_64 a{3};
+  std::mt19937_64 b{3};
+  EXPECT_EQ(EigenFilter::drawSamples(*g, 20, a), EigenFilter::drawSamplesWithLogPdf(*g, 20, b).samples);
+}
+
+TEST(Sampling, FeedsParticleSet) {
+  const MutableGaussian<double, 2> mg{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()};
+  std::mt19937_64 rng{5};
+  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*mg.toGaussian(), 10, rng)};
+  // Importance weights for a uniform target, as a particle filter proposal would use.
+  const EigenFilter::MutableParticleSet<double, 2> set{drawn.samples, -drawn.logPdf};
+  EXPECT_EQ(set.size(), 10);
+  EXPECT_TRUE((set.logWeights() == -drawn.logPdf).all());
+}
+
+TEST(Sampling, ZeroSamples) {
+  const MutableGaussian<double, Eigen::Dynamic> mg{Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
+  std::mt19937_64 rng{5};
+  const auto samples{EigenFilter::drawSamples(*mg.toGaussian(), 0, rng)};
+  EXPECT_EQ(samples.rows(), 3);
+  EXPECT_EQ(samples.cols(), 0);
+}

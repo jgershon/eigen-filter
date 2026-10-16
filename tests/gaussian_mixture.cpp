@@ -78,8 +78,8 @@ class GaussianMixtureTest : public ::testing::Test {
     for (const auto& c : mixture) {
       const Eigen::MatrixXd p{c.gaussian.cov().template cast<double>()};
       const Eigen::VectorXd r{(x - c.gaussian.mean()).template cast<double>()};
-      const double logN{-0.5 * (double(n) * std::log(2.0 * std::numbers::pi) + std::log(p.determinant()) +
-                                r.dot(p.inverse() * r))};
+      const double logN{
+          -0.5 * (double(n) * std::log(2.0 * std::numbers::pi) + std::log(p.determinant()) + r.dot(p.inverse() * r))};
       const double w{std::exp(double(c.logWeight))};
       density += w * std::exp(logN);
       total += w;
@@ -127,7 +127,7 @@ TYPED_TEST(GaussianMixtureTest, MomentsMatchReference) {
   const auto g{mixture.toGaussianMixture()};
   ASSERT_TRUE(g.has_value());
 
-  const auto [mean, cov] = this->referenceMoments(mixture);
+  const auto [mean, cov]{this->referenceMoments(mixture)};
   const auto moments{g->moments()};
   EXPECT_LT((moments.mean().template cast<double>() - mean).norm(), this->tolerance() * 10);
   EXPECT_LT((moments.cov().template cast<double>() - cov).norm(), this->tolerance() * 10 * cov.norm());
@@ -157,6 +157,21 @@ TYPED_TEST(GaussianMixtureTest, WeightScaleDoesNotChangeDensity) {
   const auto g{mixture.toGaussianMixture()};
   EXPECT_NEAR(g->logPdf(x), logPdf, this->tolerance() * std::abs(logPdf));
   EXPECT_NEAR(g->logTotalWeight(), std::log(2.0) + 5.0, this->tolerance() * 10);
+}
+
+TYPED_TEST(GaussianMixtureTest, EffectiveSampleSize) {
+  using Scalar = typename TestFixture::Scalar;
+  auto mixture{this->make()};
+  // Normalized weights 0.1, 0.75, 0.15.
+  EXPECT_NEAR(mixture.toGaussianMixture()->effectiveSampleSize(), Scalar(1 / (0.01 + 0.5625 + 0.0225)),
+              this->tolerance() * 10);
+
+  for (auto it{mixture.begin()}; it != mixture.end(); ++it) mixture.setLogWeight(it, Scalar(2));
+  EXPECT_NEAR(mixture.toGaussianMixture()->effectiveSampleSize(), Scalar(3), this->tolerance() * 10);
+
+  mixture.setLogWeight(mixture.begin(), -Eigen::NumTraits<Scalar>::infinity());
+  mixture.setLogWeight(mixture.begin() + 1, -Eigen::NumTraits<Scalar>::infinity());
+  EXPECT_EQ(mixture.toGaussianMixture()->effectiveSampleSize(), Scalar(1));
 }
 
 namespace {

@@ -14,18 +14,9 @@
 #include "Gaussian.h"
 #include "Macros.h"
 #include "Moments.h"
+#include "Weights.h"
 
 namespace EigenFilter {
-
-/** Reasons the weights of a MutableGaussianMixture cannot be normalized.
- *
- * \sa MutableGaussianMixture::logTotalWeight()
- */
-enum class WeightError {
-  Empty,      ///< the mixture has no components
-  ZeroSum,    ///< every weight is zero (every log-weight is -inf)
-  NonFinite,  ///< a log-weight is NaN or +inf
-};
 
 /** A mixture component whose covariance could not be factorized. */
 struct ComponentError {
@@ -37,35 +28,6 @@ struct ComponentError {
 
 /** Reasons MutableGaussianMixture::toGaussianMixture() can fail. */
 using GaussianMixtureError = std::variant<WeightError, ComponentError>;
-
-namespace internal {
-
-/** Streaming log-sum-exp: accumulates \f$ \log \sum_i e^{x_i} \f$ without overflow.
- * Inputs of -inf contribute nothing; an empty sum is -inf.
- */
-template <typename Scalar>
-class LogSumExp {
- public:
-  void add(Scalar x) {
-    if (x == -Eigen::NumTraits<Scalar>::infinity()) return;
-    if (x <= m_max) {
-      m_sum += Eigen::numext::exp(x - m_max);
-    } else {
-      m_sum = m_sum * Eigen::numext::exp(m_max - x) + Scalar(1);
-      m_max = x;
-    }
-  }
-
-  [[nodiscard]] Scalar value() const {
-    return m_sum == Scalar(0) ? -Eigen::NumTraits<Scalar>::infinity() : m_max + Eigen::numext::log(m_sum);
-  }
-
- private:
-  Scalar m_max{-Eigen::NumTraits<Scalar>::infinity()};
-  Scalar m_sum{0};
-};
-
-}  // namespace internal
 
 template <typename Scalar_, int Size_, int MaxSize_ = Size_>
 class GaussianMixture;
@@ -271,18 +233,7 @@ class MutableGaussianMixture {
    *          is empty, the weights sum to zero, or a log-weight is NaN or +inf.
    */
   [[nodiscard]] std::expected<Scalar, WeightError> logTotalWeight() const {
-    if (m_components.empty()) return std::unexpected{WeightError::Empty};
-    internal::LogSumExp<Scalar> total;
-    for (const auto& component : m_components) {
-      const Scalar w{component.logWeight};
-      if (Eigen::numext::isnan(w) || w == Eigen::NumTraits<Scalar>::infinity()) {
-        return std::unexpected{WeightError::NonFinite};
-      }
-      total.add(w);
-    }
-    const Scalar result{total.value()};
-    if (result == -Eigen::NumTraits<Scalar>::infinity()) return std::unexpected{WeightError::ZeroSum};
-    return result;
+    return internal::logTotalWeight<Scalar>(m_components | std::views::transform(&Component::logWeight));
   }
 
   /** Scales the weights so they sum to one. On failure the weights are unchanged.
@@ -517,9 +468,7 @@ class MutableGaussianMixture {
     component.gaussian.setCov(moments.cov());
   }
 
-  void assertUnlocked() const {
-    EIGEN_FILTER_ASSERT(m_lockCount == 0 && "MutableGaussianMixture is locked");
-  }
+  void assertUnlocked() const { EIGEN_FILTER_ASSERT(m_lockCount == 0 && "MutableGaussianMixture is locked"); }
 
   [[nodiscard]] Index indexOf(const_iterator pos) const {
     const Index i{pos - m_components.cbegin()};
@@ -639,6 +588,15 @@ class GaussianMixture {
 
   /** \returns the log of the sum of the (unnormalized) component weights */
   [[nodiscard]] Scalar logTotalWeight() const { return source().m_logTotalWeight; }
+
+  /** \returns the effective sample size \f$ 1 / \sum_i \hat w_i^2 \f$ of the normalized
+   * weights, between 1 and size()
+   */
+  [[nodiscard]] Scalar effectiveSampleSize() const {
+    Scalar sumOfSquares{0};
+    for (const auto& component : *this) sumOfSquares += Eigen::numext::abs2(normalizedWeight(component));
+    return Scalar(1) / sumOfSquares;
+  }
 
   /** \returns the mean and covariance of the mixture,
    * \f$ \mu = \sum_i \hat w_i \mu_i \f$ and
