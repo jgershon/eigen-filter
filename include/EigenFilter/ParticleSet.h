@@ -3,12 +3,18 @@
 #include <cstddef>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <random>
 #include <span>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
+#include <Eigen/Cholesky>
+
+#include "Gaussian.h"
+#include "Indexing.h"
 #include "Macros.h"
 #include "Moments.h"
 #include "Resampling.h"
@@ -20,6 +26,131 @@ namespace EigenFilter {
 template <typename Scalar_, int Size_, int MaxSize_ = Size_>
 class ParticleSet;
 
+template <typename Scalar_, int Size_, int MaxSize_>
+class MutableParticleSet;
+
+template <typename Scalar_, int Size_, int MaxSize_>
+class KernelDensity;
+
+template <typename Source, typename Indices>
+class ParticleSetMarginal;
+
+/** Reasons MutableParticleSet::toKernelDensity() can fail: the weights cannot be
+ * normalized, or the bandwidth is not positive definite or not finite.
+ */
+using KernelDensityError = std::variant<WeightError, GaussianError>;
+
+namespace internal {
+
+/** Weighted mean and (biased) covariance of the columns of \a states, with weights
+ * \f$ e^{\mathrm{logWeights}_i - \mathrm{logTotal}} \f$. The covariance is exactly symmetric.
+ */
+template <typename MomentsType, typename StatesDerived, typename WeightsDerived>
+[[nodiscard]] MomentsType weightedMoments(const Eigen::MatrixBase<StatesDerived>& states,
+                                          const Eigen::ArrayBase<WeightsDerived>& logWeights,
+                                          typename MomentsType::Scalar logTotal) {
+  using Scalar = typename MomentsType::Scalar;
+  using States = SampleSet<Scalar, MomentsType::SizeAtCompileTime, MomentsType::MaxSizeAtCompileTime>;
+  const Eigen::Array<Scalar, Eigen::Dynamic, 1> w{(logWeights - logTotal).exp()};
+  MomentsType result{states.rows()};
+  result.mean() = states * w.matrix();
+  const States scaled{(states.colwise() - result.mean()) * w.sqrt().matrix().asDiagonal()};
+  auto& cov{result.cov()};
+  if constexpr (MomentsType::MaxSizeAtCompileTime == 1) {
+    // rankUpdate() would treat the single-row matrix as a column vector.
+    cov.setConstant(scaled.squaredNorm());
+  } else {
+    cov.setZero();
+    cov.template selfadjointView<Eigen::Lower>().rankUpdate(scaled);
+    for (Eigen::Index j{1}; j < cov.cols(); ++j) {
+      for (Eigen::Index i{0}; i < j; ++i) cov(i, j) = cov(j, i);
+    }
+  }
+  return result;
+}
+
+/** Effective sample size \f$ 1 / \sum_i \hat w_i^2 \f$ of the given log-weights. */
+template <typename WeightsDerived>
+[[nodiscard]] typename WeightsDerived::Scalar effectiveSampleSize(const Eigen::ArrayBase<WeightsDerived>& logWeights,
+                                                                  typename WeightsDerived::Scalar logTotal) {
+  using Scalar = typename WeightsDerived::Scalar;
+  return Scalar(1) / (logWeights - logTotal).exp().square().sum();
+}
+
+/** Silverman's rule-of-thumb bandwidth for the columns of \a states. Does not validate
+ * the weights; invalid weights give a non-finite result.
+ */
+template <typename MomentsType, typename StatesDerived, typename WeightsDerived>
+[[nodiscard]] typename MomentsType::MatrixType silvermanBandwidth(const Eigen::MatrixBase<StatesDerived>& states,
+                                                                  const Eigen::ArrayBase<WeightsDerived>& logWeights) {
+  using Scalar = typename MomentsType::Scalar;
+  LogSumExp<Scalar> total;
+  for (const Scalar w : logWeights.derived()) total.add(w);
+  const Scalar logTotal{total.value()};
+  const Scalar d{Scalar(states.rows())};
+  const Scalar factor{Eigen::numext::pow(Scalar(4) / (effectiveSampleSize(logWeights, logTotal) * (d + Scalar(2))),
+                                         Scalar(2) / (d + Scalar(4)))};
+  return factor * weightedMoments<MomentsType>(states, logWeights, logTotal).cov();
+}
+
+/** Shared implementation of the particle set and KernelDensity conditionals.
+ *
+ * Each kernel \f$ \mathcal{N}(x_i, H) \f$ is conditioned on the entries \a given
+ * equal to \a values: its center becomes \f$ x_{a,i} + K (v - x_{b,i}) \f$ with
+ * \f$ K = H_{ab} H_{bb}^{-1} \f$, its weight gains \f$ \log \mathcal{N}(v; x_{b,i}, H_{bb}) \f$,
+ * and the shared bandwidth becomes \f$ H_{aa} - K H_{ba} \f$.
+ */
+template <typename Source, typename BandwidthDerived, typename TargetIndices, typename GivenIndices, typename Derived>
+[[nodiscard]] auto conditionalParticles(const Source& source, const Eigen::MatrixBase<BandwidthDerived>& bandwidth,
+                                        const TargetIndices& targetIndices, const GivenIndices& givenIndices,
+                                        const Eigen::MatrixBase<Derived>& values) {
+  using Scalar = typename Source::Scalar;
+  constexpr int SourceSize{Source::SizeAtCompileTime};
+  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), targetIndices)};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), givenIndices)};
+  EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
+  EIGEN_FILTER_ASSERT(values.size() == given.size());
+  using Target = std::remove_cvref_t<decltype(target)>;
+  using Given = std::remove_cvref_t<decltype(given)>;
+  constexpr int TargetSize{Target::RowsAtCompileTime};
+  constexpr int TargetMaxSize{Target::MaxRowsAtCompileTime};
+  constexpr int GivenSize{Given::RowsAtCompileTime};
+  constexpr int GivenMaxSize{Given::MaxRowsAtCompileTime};
+  using GivenMatrix = MatrixOf<Scalar, GivenSize, GivenSize, GivenMaxSize, GivenMaxSize>;
+  using CrossMatrix = MatrixOf<Scalar, TargetSize, GivenSize, TargetMaxSize, GivenMaxSize>;
+  using GivenStates = SampleSet<Scalar, GivenSize, GivenMaxSize>;
+
+  const Eigen::LDLT<GivenMatrix> ldlt{GivenMatrix{lowerSymmetricBlock(bandwidth, given, given)}};
+  const CrossMatrix cross{lowerSymmetricBlock(bandwidth, target, given)};
+  const CrossMatrix gain{ldlt.solve(cross.transpose()).transpose()};
+
+  const GivenStates offsets{source.states()(given, Eigen::placeholders::all).colwise() - values.derived()};
+  const GivenStates solved{ldlt.solve(offsets)};
+  const Eigen::Array<Scalar, 1, Eigen::Dynamic> wsse{(offsets.array() * solved.array()).colwise().sum()};
+  const Scalar log2Pi{Eigen::numext::log(Scalar(2) * Scalar(EIGEN_PI))};
+  const Scalar logNormalizer{Scalar(-0.5) * (Scalar(given.size()) * log2Pi + ldlt.vectorD().array().log().sum())};
+
+  MutableParticleSet<Scalar, TargetSize, TargetMaxSize> result{
+      SampleSet<Scalar, TargetSize, TargetMaxSize>{source.states()(target, Eigen::placeholders::all) - gain * offsets},
+      Eigen::Array<Scalar, Eigen::Dynamic, 1>{source.logWeights() + logNormalizer - Scalar(0.5) * wsse.transpose()}};
+  result.setBandwidth(lowerSymmetricBlock(bandwidth, target, target) - gain * cross.transpose());
+  return result;
+}
+
+/** conditionalParticles() with every entry not in \a givenIndices as the target. */
+template <typename Source, typename BandwidthDerived, typename GivenIndices, typename Derived>
+[[nodiscard]] auto conditionalParticles(const Source& source, const Eigen::MatrixBase<BandwidthDerived>& bandwidth,
+                                        const GivenIndices& givenIndices, const Eigen::MatrixBase<Derived>& values) {
+  constexpr int SourceSize{Source::SizeAtCompileTime};
+  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), givenIndices)};
+  return conditionalParticles(
+      source, bandwidth, complementIndices<SourceSize, SourceMaxSize>(source.particleSize(), given), given, values);
+}
+
+}  // namespace internal
+
 /** \brief Mutable set of weighted samples that can be viewed as a ParticleSet.
  *
  * Particle states are the columns of states(); their log-weights are
@@ -27,16 +158,28 @@ class ParticleSet;
  * weight. Particles are addressed by index. Removal may reorder the remaining
  * particles.
  *
- * toParticleSet() validates the weights and returns a ParticleSet view. While
- * any view is alive this object is locked: mutating, moving, or destroying it
- * is a programmer error caught by \c EIGEN_FILTER_ASSERT. It is also locked
- * while forEach() and removeIf() call back into user code.
+ * A set may carry a kernel bandwidth: the shared covariance \f$ H \f$ of the
+ * Gaussian kernels in its kernel density estimate. kdeBandwidth() is the stored
+ * bandwidth if there is one, and Silverman's rule otherwise. Conditionals store
+ * their exact bandwidth this way. A stored bandwidth is kept as the states change,
+ * so it can go stale; call clearBandwidth() to return to Silverman's rule.
+ *
+ * toParticleSet() validates the weights and returns a ParticleSet view, and
+ * toKernelDensity() goes straight to a KernelDensity. While any view is alive this
+ * object is locked: mutating, moving, or destroying it is a programmer error caught
+ * by \c EIGEN_FILTER_ASSERT. It is also locked while forEach() and removeIf() call
+ * back into user code.
+ *
+ * marginal() returns a read-only view of a subset of the state entries. While any
+ * marginal is alive this object is borrowed: states, weights, and bandwidth may
+ * change, but adding, removing, resampling, or resizing particles, or moving or
+ * destroying this object, is a programmer error.
  *
  * \tparam Scalar_   scalar type
  * \tparam Size_     state dimension, or \c Eigen::Dynamic
  * \tparam MaxSize_  maximum state dimension
  *
- * \sa class ParticleSet, \ref Resamplers
+ * \sa class ParticleSet, class KernelDensity, \ref Resamplers
  */
 template <typename Scalar_, int Size_, int MaxSize_ = Size_>
 class MutableParticleSet {
@@ -51,8 +194,10 @@ class MutableParticleSet {
   using ConstStateType = typename SampleSetType::ConstColXpr;
   using WeightArrayType = Eigen::Array<Scalar, Eigen::Dynamic, 1>;
   using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_>;
+  using KernelDensityType = KernelDensity<Scalar_, Size_, MaxSize_>;
   static constexpr int SizeAtCompileTime{Size_};
   static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr bool IsMutable{true};
 
   /** Result of removeIf(): the log of the removed fraction of the total weight,
    * or nothing when \a ReturnRemovedWeight is false.
@@ -105,37 +250,48 @@ class MutableParticleSet {
     assign(states, logWeights);
   }
 
-  /** Copies the particles. The copy starts unlocked. */
-  MutableParticleSet(const MutableParticleSet& other) : m_states{other.m_states}, m_logWeights{other.m_logWeights} {}
+  /** Copies the particles and any stored bandwidth. The copy starts unlocked and unborrowed. */
+  MutableParticleSet(const MutableParticleSet& other)
+      : m_states{other.m_states}, m_logWeights{other.m_logWeights}, m_bandwidth{other.m_bandwidth} {}
 
-  /** Moving a locked object is a programmer error; if \c EIGEN_FILTER_ASSERT throws,
-   * the exception reaches this \c noexcept boundary and calls \c std::terminate.
+  /** Moving a locked or borrowed object is a programmer error; if \c EIGEN_FILTER_ASSERT
+   * throws, the exception reaches this \c noexcept boundary and calls \c std::terminate.
    */
   MutableParticleSet(MutableParticleSet&& other) noexcept
       : m_states{std::move(other.m_states)},
         m_logWeights{std::move(other.m_logWeights)},
+        m_bandwidth{std::move(other.m_bandwidth)},
         m_stateScratch{std::move(other.m_stateScratch)},
         m_weightScratch{std::move(other.m_weightScratch)},
         m_ancestors{std::move(other.m_ancestors)} {
     other.assertUnlocked();
+    other.assertUnborrowed();
   }
 
   MutableParticleSet& operator=(const MutableParticleSet& other) {
     assertUnlocked();
+    assertUnborrowed();
     m_states = other.m_states;
     m_logWeights = other.m_logWeights;
+    m_bandwidth = other.m_bandwidth;
     return *this;
   }
 
   MutableParticleSet& operator=(MutableParticleSet&& other) noexcept {
     assertUnlocked();
+    assertUnborrowed();
     other.assertUnlocked();
+    other.assertUnborrowed();
     m_states = std::move(other.m_states);
     m_logWeights = std::move(other.m_logWeights);
+    m_bandwidth = std::move(other.m_bandwidth);
     return *this;
   }
 
-  ~MutableParticleSet() { assertUnlocked(); }
+  ~MutableParticleSet() {
+    assertUnlocked();
+    assertUnborrowed();
+  }
 
   /** \returns the number of particles */
   [[nodiscard]] Index size() const { return m_states.cols(); }
@@ -149,30 +305,66 @@ class MutableParticleSet {
   [[nodiscard]] ConstStateType state(Index i) const { return m_states.col(i); }
   [[nodiscard]] Scalar logWeight(Index i) const { return m_logWeights(i); }
 
-  /** Resizes every particle state to dimension \a n. States are unspecified afterward. */
+  /** \returns the stored kernel bandwidth, if any */
+  [[nodiscard]] const std::optional<MatrixType>& bandwidth() const { return m_bandwidth; }
+
+  /** \returns the bandwidth a kernel density estimate uses: the stored bandwidth, or
+   * Silverman's rule if none is stored (non-finite if the weights are invalid)
+   */
+  [[nodiscard]] MatrixType kdeBandwidth() const {
+    return m_bandwidth ? *m_bandwidth : internal::silvermanBandwidth<MomentsType>(m_states, m_logWeights);
+  }
+
+  /** Stores \a bandwidth as the kernel covariance. Only its lower triangle is read. */
+  template <typename Derived>
+  void setBandwidth(const Eigen::MatrixBase<Derived>& bandwidth) {
+    assertUnlocked();
+    EIGEN_FILTER_ASSERT(bandwidth.rows() == particleSize() && bandwidth.cols() == particleSize());
+    m_bandwidth = MatrixType{bandwidth};
+  }
+
+  /** Forgets the stored bandwidth, so kdeBandwidth() returns to Silverman's rule. */
+  void clearBandwidth() {
+    assertUnlocked();
+    m_bandwidth.reset();
+  }
+
+  /** Resizes every particle state to dimension \a n and clears the bandwidth.
+   * States are unspecified afterward.
+   */
   void resizeParticles(Index n) {
     assertUnlocked();
+    assertUnborrowed();
     m_states.resize(n, size());
+    m_bandwidth.reset();
   }
 
   void clear() {
     assertUnlocked();
+    assertUnborrowed();
     m_states.resize(particleSize(), 0);
     m_logWeights.resize(0);
   }
 
-  /** Replaces the particles with the columns of \a states, with equal weights summing to one. */
+  /** Replaces the particles with the columns of \a states, with equal weights summing
+   * to one. Clears the bandwidth if the dimension changes.
+   */
   template <typename StatesDerived>
   void assign(const Eigen::MatrixBase<StatesDerived>& states) {
     assertUnlocked();
+    assertUnborrowed();
+    if (states.rows() != particleSize()) m_bandwidth.reset();
     m_states = states;
     m_logWeights.setConstant(size(), -Eigen::numext::log(Scalar(size())));
   }
 
+  /** Replaces the particles and weights. Clears the bandwidth if the dimension changes. */
   template <typename StatesDerived, typename WeightsDerived>
   void assign(const Eigen::MatrixBase<StatesDerived>& states, const Eigen::DenseBase<WeightsDerived>& logWeights) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(logWeights.size() == states.cols());
+    if (states.rows() != particleSize()) m_bandwidth.reset();
     m_states = states;
     m_logWeights = logWeights.derived().array();
   }
@@ -184,6 +376,7 @@ class MutableParticleSet {
   template <typename Derived>
   Index add(Scalar logWeight, const Eigen::MatrixBase<Derived>& state) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(state.size() == particleSize());
     const Index i{size()};
     m_states.conservativeResize(Eigen::NoChange, i + 1);
@@ -196,6 +389,7 @@ class MutableParticleSet {
   /** Appends copies of \a other's particles, which must have the same dimension. */
   void append(const MutableParticleSet& other) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(other.particleSize() == particleSize());
     const Index n{size()};
     const Index m{other.size()};
@@ -208,6 +402,7 @@ class MutableParticleSet {
   /** Removes particle \a i by moving the last particle into its place. */
   void remove(Index i) {
     assertUnlocked();
+    assertUnborrowed();
     assertIndex(i);
     const Index last{size() - 1};
     if (i != last) {
@@ -316,6 +511,7 @@ class MutableParticleSet {
   template <bool ReturnRemovedWeight = false, typename Pred>
   RemovalResult<ReturnRemovedWeight> removeIf(Pred pred) {
     assertUnlocked();
+    assertUnborrowed();
     const auto removeAtIndex{
         [&](Index i) { return static_cast<bool>(std::invoke(pred, m_logWeights(i), std::as_const(m_states).col(i))); }};
     if constexpr (ReturnRemovedWeight) {
@@ -331,6 +527,7 @@ class MutableParticleSet {
 
   /** Replaces the particles with \a newSize draws chosen by \a resampler in
    * proportion to their weights, then sets every weight to \f$ 1/\mathrm{newSize} \f$.
+   * A stored bandwidth is kept.
    *
    * \a rng is used only during this call. Scratch storage is kept between calls,
    * so repeated resampling at a steady size does not allocate.
@@ -344,6 +541,7 @@ class MutableParticleSet {
     requires Resampler<R, Scalar, G>
   [[nodiscard]] std::expected<void, WeightError> resample(G& rng, Index newSize, const R& resampler = {}) {
     assertUnlocked();
+    assertUnborrowed();
     EIGEN_FILTER_ASSERT(newSize > 0);
     const auto total{logTotalWeight()};
     if (!total) return std::unexpected{total.error()};
@@ -374,6 +572,36 @@ class MutableParticleSet {
   /** \returns the ancestor indices chosen by the last successful resample() */
   [[nodiscard]] std::span<const Index> ancestors() const { return m_ancestors; }
 
+  /** \returns a read-only view of the state entries \a indices; see
+   * MutableGaussian::marginal() for the index types accepted. While the marginal is
+   * alive this object is borrowed.
+   *
+   * \sa class ParticleSetMarginal
+   */
+  template <typename Indices>
+  [[nodiscard]] ParticleSetMarginal<MutableParticleSet, Indices> marginal(const Indices& indices) const {
+    return ParticleSetMarginal<MutableParticleSet, Indices>{*this, indices};
+  }
+
+  /** \returns a copy of the kernel density estimate's distribution of the entries
+   * \a target given that the entries \a given equal \a values.
+   *
+   * Uses kdeBandwidth(). The result's particles are the conditioned kernel centers,
+   * its weights are unnormalized (they gain each kernel's likelihood of \a values),
+   * and its stored bandwidth is the exact conditional bandwidth. Always produces a result.
+   */
+  template <typename TargetIndices, typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
+                                 const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(*this, kdeBandwidth(), target, given, values);
+  }
+
+  /** conditional() with every entry not in \a given as the target. */
+  template <typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(*this, kdeBandwidth(), given, values);
+  }
+
   /** Validates the weights (see logTotalWeight()).
    *
    * \returns a ParticleSet view that locks this object for its lifetime, or a WeightError.
@@ -386,8 +614,25 @@ class MutableParticleSet {
     return ParticleSetType{this};
   }
 
+  /** Validates the weights and builds a kernel density estimate with kdeBandwidth().
+   *
+   * \returns a KernelDensity that locks this object for its lifetime, or a
+   *          KernelDensityError if the weights cannot be normalized or the bandwidth
+   *          is not positive definite.
+   */
+  [[nodiscard("the KernelDensity holds the lock; discarding it releases the lock immediately")]]
+  std::expected<KernelDensityType, KernelDensityError> toKernelDensity() const {
+    const auto view{toParticleSet()};
+    if (!view) return std::unexpected{KernelDensityError{view.error()}};
+    auto kde{kernelDensity(*view)};
+    if (!kde) return std::unexpected{KernelDensityError{kde.error()}};
+    return std::move(*kde);
+  }
+
  private:
   friend ParticleSetType;
+  template <typename>
+  friend class internal::Borrow;
 
   class ScopedLock {
    public:
@@ -401,6 +646,10 @@ class MutableParticleSet {
   };
 
   void assertUnlocked() const { EIGEN_FILTER_ASSERT(m_lockCount == 0 && "MutableParticleSet is locked"); }
+
+  void assertUnborrowed() const {
+    EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "MutableParticleSet is borrowed by a live marginal");
+  }
 
   void assertIndex([[maybe_unused]] Index i) const {
     EIGEN_FILTER_ASSERT(i >= 0 && i < size() && "particle index out of range");
@@ -432,6 +681,7 @@ class MutableParticleSet {
 
   SampleSetType m_states{Size_ == Eigen::Dynamic ? 0 : Size_, 0};
   WeightArrayType m_logWeights;
+  std::optional<MatrixType> m_bandwidth;
   // Resampling scratch, kept to avoid reallocating on every resample.
   SampleSetType m_stateScratch;
   std::vector<Scalar> m_weightScratch;
@@ -439,6 +689,7 @@ class MutableParticleSet {
   // Filled by the const toParticleSet() for use by views.
   mutable Scalar m_logTotalWeight{};
   mutable int m_lockCount{0};
+  mutable int m_borrowCount{0};
 };
 
 /** \brief Read-only view of a MutableParticleSet whose weights have been validated.
@@ -450,7 +701,7 @@ class MutableParticleSet {
  * locks the source; copies share the lock and the last one to be destroyed
  * releases it. A ParticleSet must not outlive its source.
  *
- * \sa class MutableParticleSet
+ * \sa class MutableParticleSet, class KernelDensity
  */
 template <typename Scalar_, int Size_, int MaxSize_>
 class ParticleSet {
@@ -466,6 +717,7 @@ class ParticleSet {
   using WeightArrayType = typename MutableType::WeightArrayType;
   static constexpr int SizeAtCompileTime{Size_};
   static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr bool IsMutable{false};
 
   ParticleSet(const ParticleSet& other) : m_source{other.m_source} { lock(); }
   ParticleSet(ParticleSet&& other) noexcept : m_source{std::exchange(other.m_source, nullptr)} {}
@@ -496,6 +748,8 @@ class ParticleSet {
   [[nodiscard]] const WeightArrayType& logWeights() const { return source().logWeights(); }
   [[nodiscard]] ConstStateType state(Index i) const { return source().state(i); }
   [[nodiscard]] Scalar logWeight(Index i) const { return source().logWeight(i); }
+  [[nodiscard]] const std::optional<MatrixType>& bandwidth() const { return source().bandwidth(); }
+  [[nodiscard]] MatrixType kdeBandwidth() const { return source().kdeBandwidth(); }
 
   /** \returns the log of the sum of the (unnormalized) weights */
   [[nodiscard]] Scalar logTotalWeight() const { return source().m_logTotalWeight; }
@@ -504,30 +758,39 @@ class ParticleSet {
   [[nodiscard]] auto normalizedWeights() const { return (logWeights() - logTotalWeight()).exp(); }
 
   /** \returns the effective sample size \f$ 1 / \sum_i \hat w_i^2 \f$, between 1 and size() */
-  [[nodiscard]] Scalar effectiveSampleSize() const { return Scalar(1) / normalizedWeights().square().sum(); }
+  [[nodiscard]] Scalar effectiveSampleSize() const {
+    return internal::effectiveSampleSize(logWeights(), logTotalWeight());
+  }
 
   /** \returns the weighted mean and covariance,
    * \f$ \mu = \sum_i \hat w_i x_i \f$ and \f$ \Sigma = \sum_i \hat w_i (x_i - \mu)(x_i - \mu)^T \f$.
    *
    * The covariance is the plain weighted (biased) estimate and is exactly symmetric.
+   * It excludes any kernel bandwidth; see KernelDensity::moments() for that.
    */
   [[nodiscard]] MomentsType moments() const {
-    const WeightArrayType w{normalizedWeights()};
-    MomentsType result{particleSize()};
-    result.mean() = states() * w.matrix();
-    const SampleSetType scaled{(states().colwise() - result.mean()) * w.sqrt().matrix().asDiagonal()};
-    auto& cov{result.cov()};
-    if constexpr (MaxSize_ == 1) {
-      // rankUpdate() would treat the single-row matrix as a column vector.
-      cov.setConstant(scaled.squaredNorm());
-    } else {
-      cov.setZero();
-      cov.template selfadjointView<Eigen::Lower>().rankUpdate(scaled);
-      for (Index j{1}; j < cov.cols(); ++j) {
-        for (Index i{0}; i < j; ++i) cov(i, j) = cov(j, i);
-      }
-    }
-    return result;
+    return internal::weightedMoments<MomentsType>(states(), logWeights(), logTotalWeight());
+  }
+
+  /** \returns a read-only view of the state entries \a indices. It holds a copy of
+   * this view, so the source stays locked while the marginal is alive.
+   */
+  template <typename Indices>
+  [[nodiscard]] ParticleSetMarginal<ParticleSet, Indices> marginal(const Indices& indices) const {
+    return ParticleSetMarginal<ParticleSet, Indices>{*this, indices};
+  }
+
+  /** \returns a copy of the conditional distribution; see MutableParticleSet::conditional(). */
+  template <typename TargetIndices, typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
+                                 const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(*this, kdeBandwidth(), target, given, values);
+  }
+
+  /** conditional() with every entry not in \a given as the target. */
+  template <typename GivenIndices, typename Derived>
+  [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(*this, kdeBandwidth(), given, values);
   }
 
  private:
@@ -551,4 +814,90 @@ class ParticleSet {
   const MutableType* m_source;
 };
 
+/** \brief Read-only view of a subset of the state entries of a MutableParticleSet
+ * or ParticleSet.
+ *
+ * Obtained from marginal(). From a MutableParticleSet it borrows the source; from a
+ * ParticleSet it holds a copy of the view, and so the lock. Weights are those of
+ * the source. A stored bandwidth is marginalized too, which keeps the kernel density
+ * estimate exact: the marginal of a KDE is the KDE of the marginal particles with
+ * bandwidth \f$ H_{aa} \f$.
+ *
+ * \tparam Source   MutableParticleSet or ParticleSet
+ * \tparam Indices  the index type passed to marginal()
+ */
+template <typename Source, typename Indices>
+class ParticleSetMarginal {
+  using Selection = internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>;
+
+ public:
+  using Scalar = typename Source::Scalar;
+  using Index = Eigen::Index;
+  static constexpr int SizeAtCompileTime{Selection::size};
+  static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
+  using MutableType = MutableParticleSet<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime>;
+  using MatrixType = typename MutableType::MatrixType;
+  using WeightArrayType = typename MutableType::WeightArrayType;
+  using IndexVectorType = typename Selection::type;
+
+  ParticleSetMarginal(const Source& source, const Indices& indices)
+      : m_holder{source},
+        m_indices{internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(
+            source.particleSize(), indices)} {
+    EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
+  }
+
+  /** \returns the number of particles */
+  [[nodiscard]] Index size() const { return source().size(); }
+
+  /** \returns the dimension of every marginal particle */
+  [[nodiscard]] Index particleSize() const { return m_indices.size(); }
+
+  /** \returns the source entries this marginal selects */
+  [[nodiscard]] const IndexVectorType& indices() const { return m_indices; }
+
+  [[nodiscard]] auto states() const { return source().states()(m_indices, Eigen::placeholders::all); }
+  [[nodiscard]] auto state(Index i) const { return source().state(i)(m_indices); }
+  [[nodiscard]] const WeightArrayType& logWeights() const { return source().logWeights(); }
+  [[nodiscard]] Scalar logWeight(Index i) const { return source().logWeight(i); }
+
+  /** \returns the marginal of the stored bandwidth, if the source has one */
+  [[nodiscard]] std::optional<MatrixType> bandwidth() const {
+    if (!source().bandwidth()) return std::nullopt;
+    return MatrixType{internal::lowerSymmetricBlock(*source().bandwidth(), m_indices, m_indices)};
+  }
+
+  /** \returns an independent MutableParticleSet holding this marginal, with the
+   * source's weights and the marginal of any stored bandwidth
+   */
+  [[nodiscard]] MutableType copy() const {
+    MutableType result{states(), logWeights()};
+    if (const auto h{bandwidth()}) result.setBandwidth(*h);
+    return result;
+  }
+
+ private:
+  [[nodiscard]] const Source& source() const { return m_holder.get(); }
+
+  internal::HolderFor<Source> m_holder;
+  IndexVectorType m_indices;
+};
+
+/** \returns Silverman's rule-of-thumb bandwidth
+ * \f[ H = \left(\frac{4}{N_\mathrm{eff}\,(d + 2)}\right)^{2/(d+4)} \Sigma, \f]
+ * where \f$ \Sigma \f$ is the particles' weighted covariance, \f$ d \f$ their
+ * dimension, and \f$ N_\mathrm{eff} \f$ their effective sample size.
+ *
+ * Near-optimal for roughly Gaussian particle clouds; scale it down for multimodal ones.
+ */
+template <typename Scalar, int Size, int MaxSize>
+[[nodiscard]] typename ParticleSet<Scalar, Size, MaxSize>::MatrixType silvermanBandwidth(
+    const ParticleSet<Scalar, Size, MaxSize>& particles) {
+  return internal::silvermanBandwidth<typename ParticleSet<Scalar, Size, MaxSize>::MomentsType>(particles.states(),
+                                                                                                particles.logWeights());
+}
+
 }  // namespace EigenFilter
+
+// KernelDensity completes MutableParticleSet::toKernelDensity(); it includes this header first.
+#include "KernelDensity.h"

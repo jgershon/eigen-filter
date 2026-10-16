@@ -23,6 +23,9 @@ add_executable(eigen_filter_tests
   particle_set.cpp
   sampling.cpp
   kernel_density.cpp
+  gaussian_subspace.cpp
+  mixture_subspace.cpp
+  particle_subspace.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter
