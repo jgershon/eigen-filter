@@ -19,6 +19,10 @@ add_executable(eigen_filter_tests
   moments.cpp
   gaussian.cpp
   gaussian_mixture.cpp
+  resampling.cpp
+  particle_set.cpp
+  sampling.cpp
+  kernel_density.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter
