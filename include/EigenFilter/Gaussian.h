@@ -112,36 +112,21 @@ class MutableGaussian {
   [[nodiscard]] const VectorType& mean() const { return m_moments.mean(); }
   [[nodiscard]] const MatrixType& cov() const { return m_moments.cov(); }
 
-  /** \returns a writable reference to the mean. Do not resize through this reference.
-   *
-   * \sa setMean()
-   */
-  [[nodiscard]] VectorType& mutableMean() {
-    assertUnlocked();
-    return m_moments.mean();
-  }
-
-  /** \returns a writable reference to the covariance, invalidating the factorization.
-   * Do not resize through this reference.
-   *
-   * \sa setCov()
-   */
-  [[nodiscard]] MatrixType& mutableCov() {
-    assertUnlocked();
-    m_factorValid = false;
-    return m_moments.cov();
-  }
-
+  /** Sets the mean. Does not invalidate the factorization. */
   template <typename Derived>
   void setMean(const Eigen::MatrixBase<Derived>& mean) {
+    assertUnlocked();
     EIGEN_FILTER_ASSERT(mean.size() == size());
-    mutableMean() = mean;
+    m_moments.mean() = mean;
   }
 
+  /** Sets the covariance, invalidating the factorization. */
   template <typename Derived>
   void setCov(const Eigen::MatrixBase<Derived>& cov) {
+    assertUnlocked();
     EIGEN_FILTER_ASSERT(cov.rows() == size() && cov.cols() == size());
-    mutableCov() = cov;
+    m_moments.cov() = cov;
+    m_factorValid = false;
   }
 
   /** Factorizes the covariance if it has changed since the last factorization.
