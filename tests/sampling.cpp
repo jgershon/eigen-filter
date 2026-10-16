@@ -1,8 +1,10 @@
+#include <EigenFilter/GaussianMixture.h>
 #include <EigenFilter/ParticleSet.h>
 #include <EigenFilter/Sampling.h>
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <random>
 #include <type_traits>
@@ -108,4 +110,61 @@ TEST(Sampling, ZeroSamples) {
   const auto samples{EigenFilter::drawSamples(*mg.toGaussian(), 0, rng)};
   EXPECT_EQ(samples.rows(), 3);
   EXPECT_EQ(samples.cols(), 0);
+}
+
+namespace {
+
+// Three well-separated, narrow 2-D components with unnormalized weights 1, 2, 5.
+EigenFilter::MutableGaussianMixture<double, 2> makeSeparatedMixture(double spread) {
+  EigenFilter::MutableGaussianMixture<double, 2> mixture;
+  const Eigen::Matrix2d cov{{spread, 0.3 * spread}, {0.3 * spread, 0.5 * spread}};
+  mixture.add(std::log(1.0), Eigen::Vector2d{-10.0, 0.0}, cov);
+  mixture.add(std::log(2.0), Eigen::Vector2d{0.0, 10.0}, cov);
+  mixture.add(std::log(5.0), Eigen::Vector2d{10.0, 0.0}, cov);
+  return mixture;
+}
+
+}  // namespace
+
+TEST(MixtureSampling, SampleMomentsConverge) {
+  const auto mixture{makeSeparatedMixture(4.0)};
+  const auto g{mixture.toGaussianMixture()};
+  ASSERT_TRUE(g.has_value());
+  std::mt19937_64 rng{23};
+  constexpr Eigen::Index count{40000};
+  const auto samples{EigenFilter::drawSamples(*g, count, rng)};
+  ASSERT_EQ(samples.cols(), count);
+
+  const auto moments{g->moments()};
+  const Eigen::Vector2d mean{samples.rowwise().mean()};
+  const Eigen::Matrix2Xd centered{samples.colwise() - mean};
+  const Eigen::Matrix2d cov{centered * centered.transpose() / double(count - 1)};
+  for (Eigen::Index i{0}; i < 2; ++i) {
+    EXPECT_NEAR(mean(i), moments.mean()(i), 5 * std::sqrt(moments.cov()(i, i) / double(count))) << "mean " << i;
+  }
+  EXPECT_LT((cov - moments.cov()).norm(), 0.05 * moments.cov().norm());
+}
+
+TEST(MixtureSampling, SystematicGivesEachComponentItsShare) {
+  const auto mixture{makeSeparatedMixture(0.01)};
+  const auto g{mixture.toGaussianMixture()};
+  std::mt19937_64 rng{29};
+  const auto samples{EigenFilter::drawSamples(*g, 80, rng, EigenFilter::SystematicResampler{})};
+  std::array<int, 3> counts{};
+  for (Eigen::Index j{0}; j < samples.cols(); ++j) {
+    for (std::size_t c{0}; c < 3; ++c) {
+      if ((samples.col(j) - (g->begin() + Eigen::Index(c))->gaussian.mean()).norm() < 1.0) ++counts[c];
+    }
+  }
+  EXPECT_EQ(counts, (std::array<int, 3>{10, 20, 50}));
+}
+
+TEST(MixtureSampling, LogPdfMatchesMixture) {
+  const auto mixture{makeSeparatedMixture(4.0)};
+  const auto g{mixture.toGaussianMixture()};
+  std::mt19937_64 a{31};
+  std::mt19937_64 b{31};
+  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*g, 25, a)};
+  EXPECT_EQ(drawn.samples, EigenFilter::drawSamples(*g, 25, b));
+  for (Eigen::Index j{0}; j < 25; ++j) EXPECT_EQ(drawn.logPdf(j), g->logPdf(drawn.samples.col(j))) << "sample " << j;
 }
