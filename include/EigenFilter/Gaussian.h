@@ -13,9 +13,9 @@
 
 namespace EigenFilter {
 
-/** Reasons MutableGaussian::toGaussian() can fail.
+/** Reasons Gaussian::toDensity() can fail.
  *
- * \sa MutableGaussian::toGaussian()
+ * \sa Gaussian::toDensity()
  */
 enum class GaussianError {
   NotPositiveDefinite,  ///< Cholesky factorization of the covariance failed
@@ -23,10 +23,10 @@ enum class GaussianError {
 };
 
 template <typename Scalar_, typename Space_>
-class Gaussian;
+class GaussianDensity;
 
 template <typename Scalar_, typename Space_>
-class MutableGaussian;
+class Gaussian;
 
 template <typename Source, typename Indices,
           typename SubSpace = internal::ProjectedSpace<
@@ -40,7 +40,7 @@ namespace internal {
 template <template <typename, typename, typename> typename Marginal, typename... Path, typename Source>
 [[nodiscard]] auto tagMarginal(const Source& source);
 
-/** Shared implementation of MutableGaussian::conditional() and Gaussian::conditional(). */
+/** Shared implementation of Gaussian::conditional() and GaussianDensity::conditional(). */
 template <typename Source, typename TargetIndices, typename GivenIndices, typename Derived>
 [[nodiscard]] auto conditionalGaussian(const Source& source, const TargetIndices& targetIndices,
                                        const GivenIndices& givenIndices, const Eigen::MatrixBase<Derived>& values) {
@@ -56,7 +56,7 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
   const auto givenSpace{
       projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(source.space(), source.size(), given)};
   auto result{conditionMoments(source.mean(), source.cov(), target, given, values, givenSpace, targetSpace)};
-  return MutableGaussian<typename Source::Scalar, std::remove_cvref_t<decltype(targetSpace)>>{
+  return Gaussian<typename Source::Scalar, std::remove_cvref_t<decltype(targetSpace)>>{
       targetSpace, std::move(result.mean), std::move(result.cov)};
 }
 
@@ -72,12 +72,12 @@ template <typename Source, typename GivenIndices, typename Derived>
 
 }  // namespace internal
 
-/** \brief Mutable mean and covariance that can be viewed as a Gaussian.
+/** \brief A Gaussian distribution: a mean and covariance in a space.
  *
- * toGaussian() factorizes the covariance (if it has changed since the last
- * factorization) and returns a Gaussian view. While any Gaussian view is alive
- * this object is locked: mutating, resizing, moving, or destroying it is a
- * programmer error caught by \c EIGEN_FILTER_ASSERT.
+ * toDensity() factorizes the covariance (if it has changed since the last
+ * factorization) and returns a GaussianDensity, which evaluates the density. While
+ * any GaussianDensity is alive this object is locked: mutating, resizing, moving, or
+ * destroying it is a programmer error caught by \c EIGEN_FILTER_ASSERT.
  *
  * marginal() returns a read-only view of a subset of the entries. While any
  * marginal is alive this object is borrowed: its values may change, but resizing,
@@ -95,10 +95,10 @@ template <typename Source, typename GivenIndices, typename Derived>
  * \tparam Space_   space of the coordinates, which sets the dimension and the storage
  *                  bound (see \ref Spaces)
  *
- * \sa class Gaussian, class Moments, MutableGaussianN
+ * \sa class GaussianDensity, class Moments, GaussianN
  */
 template <typename Scalar_, typename Space_>
-class MutableGaussian {
+class Gaussian {
  public:
   using MomentsType = Moments<Scalar_, Space_>;
   using Scalar = typename MomentsType::Scalar;
@@ -106,39 +106,39 @@ class MutableGaussian {
   using VectorType = typename MomentsType::VectorType;
   using MatrixType = typename MomentsType::MatrixType;
   using SpaceType = Space_;
-  using GaussianType = Gaussian<Scalar_, Space_>;
+  using DensityType = GaussianDensity<Scalar_, Space_>;
   static constexpr int SizeAtCompileTime{MomentsType::SizeAtCompileTime};
   static constexpr int MaxSizeAtCompileTime{MomentsType::MaxSizeAtCompileTime};
-  static constexpr bool IsMutable{true};
+  static constexpr bool IsOwner{true};
 
-  MutableGaussian() = default;
+  Gaussian() = default;
 
   /** Constructs a Gaussian of dimension \a n with uninitialized contents. */
-  explicit MutableGaussian(Index n) : m_moments{n} { adoptDefaultSpace(); }
+  explicit Gaussian(Index n) : m_moments{n} { adoptDefaultSpace(); }
 
-  explicit MutableGaussian(MomentsType moments) : m_moments{std::move(moments)} { adoptDefaultSpace(); }
+  explicit Gaussian(MomentsType moments) : m_moments{std::move(moments)} { adoptDefaultSpace(); }
 
   template <typename MeanDerived, typename CovDerived>
-  MutableGaussian(const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
+  Gaussian(const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
       : m_moments{mean, cov} {
     adoptDefaultSpace();
   }
 
   /** Constructs a Gaussian of dimension \a n in \a space, with uninitialized contents. */
-  MutableGaussian(Space_ space, Index n) : m_moments{n}, m_space{std::move(space)} { checkSpace(); }
+  Gaussian(Space_ space, Index n) : m_moments{n}, m_space{std::move(space)} { checkSpace(); }
 
-  MutableGaussian(Space_ space, MomentsType moments) : m_moments{std::move(moments)}, m_space{std::move(space)} {
+  Gaussian(Space_ space, MomentsType moments) : m_moments{std::move(moments)}, m_space{std::move(space)} {
     checkSpace();
   }
 
   template <typename MeanDerived, typename CovDerived>
-  MutableGaussian(Space_ space, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
+  Gaussian(Space_ space, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
       : m_moments{mean, cov}, m_space{std::move(space)} {
     checkSpace();
   }
 
   /** Copies the data and any valid factorization. The copy starts unlocked. */
-  MutableGaussian(const MutableGaussian& other)
+  Gaussian(const Gaussian& other)
       : m_moments{other.m_moments},
         m_space{other.m_space},
         m_llt{other.m_llt},
@@ -148,7 +148,7 @@ class MutableGaussian {
   /** Moving a locked object is a programmer error; if \c EIGEN_FILTER_ASSERT throws,
    * the exception reaches this \c noexcept boundary and calls \c std::terminate.
    */
-  MutableGaussian(MutableGaussian&& other) noexcept
+  Gaussian(Gaussian&& other) noexcept
       : m_moments{std::move(other.m_moments)},
         m_space{std::move(other.m_space)},
         m_llt{std::move(other.m_llt)},
@@ -159,7 +159,7 @@ class MutableGaussian {
     other.m_factorValid = false;
   }
 
-  MutableGaussian& operator=(const MutableGaussian& other) {
+  Gaussian& operator=(const Gaussian& other) {
     assertUnlocked();
     assertUnborrowed();
     m_moments = other.m_moments;
@@ -170,7 +170,7 @@ class MutableGaussian {
     return *this;
   }
 
-  MutableGaussian& operator=(MutableGaussian&& other) noexcept {
+  Gaussian& operator=(Gaussian&& other) noexcept {
     assertUnlocked();
     assertUnborrowed();
     other.assertUnlocked();
@@ -184,7 +184,7 @@ class MutableGaussian {
     return *this;
   }
 
-  ~MutableGaussian() {
+  ~Gaussian() {
     assertUnlocked();
     assertUnborrowed();
   }
@@ -233,8 +233,8 @@ class MutableGaussian {
    * \sa class GaussianMarginal
    */
   template <typename Indices>
-  [[nodiscard]] GaussianMarginal<MutableGaussian, Indices> marginal(const Indices& indices) const {
-    return GaussianMarginal<MutableGaussian, Indices>{*this, indices};
+  [[nodiscard]] GaussianMarginal<Gaussian, Indices> marginal(const Indices& indices) const {
+    return GaussianMarginal<Gaussian, Indices>{*this, indices};
   }
 
   /** \returns a read-only view of the subspace named by the tag path \a Path (see
@@ -251,7 +251,7 @@ class MutableGaussian {
    *
    * \f$ \mu_{a|b} = \mu_a + K (v - \mu_b) \f$ and \f$ \Sigma_{a|b} = \Sigma_{aa} - K \Sigma_{ba} \f$,
    * with \f$ K = \Sigma_{ab} \Sigma_{bb}^{-1} \f$. Uses a pivoted LDLT, so it always produces
-   * a result; for a numerically singular source the result may fail toGaussian().
+   * a result; for a numerically singular source the result may fail toDensity().
    */
   template <typename TargetIndices, typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
@@ -275,12 +275,12 @@ class MutableGaussian {
   /** Factorizes the covariance if it has changed since the last factorization.
    *
    * Calling this ahead of time moves the cost of factorization out of a later
-   * toGaussian() call. Does not lock this object.
+   * toDensity() call. Does not lock this object.
    *
    * \returns nothing on success, or a GaussianError if the covariance is not
    *          positive definite or not finite.
    *
-   * \sa toGaussian(), GaussianError
+   * \sa toDensity(), GaussianError
    */
   [[nodiscard]] std::expected<void, GaussianError> factorize() const {
     if (m_factorValid) return {};
@@ -297,28 +297,28 @@ class MutableGaussian {
 
   /** Factorizes the covariance if needed (see factorize()).
    *
-   * \returns a Gaussian view that locks this object for its lifetime, or a
+   * \returns a GaussianDensity that locks this object for its lifetime, or a
    *          GaussianError if the covariance is not positive definite or not finite.
    *
-   * \sa factorize(), class Gaussian, GaussianError
+   * \sa factorize(), class GaussianDensity, GaussianError
    */
-  [[nodiscard("the Gaussian view holds the lock; discarding it releases the lock immediately")]]
-  std::expected<GaussianType, GaussianError> toGaussian() const {
+  [[nodiscard("the GaussianDensity holds the lock; discarding it releases the lock immediately")]]
+  std::expected<DensityType, GaussianError> toDensity() const {
     if (auto result{factorize()}; !result) return std::unexpected{result.error()};
-    return GaussianType{this};
+    return DensityType{this};
   }
 
  private:
-  friend GaussianType;
+  friend DensityType;
   template <typename>
   friend class internal::Borrow;
 
   void assertUnlocked() const {
-    EIGEN_FILTER_ASSERT(m_lockCount == 0 && "MutableGaussian is locked by a live Gaussian view");
+    EIGEN_FILTER_ASSERT(m_lockCount == 0 && "Gaussian is locked by a live GaussianDensity");
   }
 
   void assertUnborrowed() const {
-    EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "MutableGaussian is borrowed by a live marginal");
+    EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "Gaussian is borrowed by a live marginal");
   }
 
   /** Sizes a default-constructed space to the data and normalizes the mean. */
@@ -346,36 +346,36 @@ class MutableGaussian {
   mutable int m_borrowCount{0};
 };
 
-/** \brief Read-only view of a MutableGaussian whose covariance has been factorized.
+/** \brief The density of a Gaussian whose covariance has been factorized: a read-only view.
  *
  * Represents the density
  * \f[ p(x) = (2\pi)^{-n/2} |\Sigma|^{-1/2} \exp\left(-\tfrac{1}{2}(x-\mu)^T \Sigma^{-1} (x-\mu)\right). \f]
  *
- * Obtained from MutableGaussian::toGaussian(). Holding a Gaussian locks the
- * source MutableGaussian; copies share the lock and the last one to be
- * destroyed releases it. A Gaussian must not outlive its source.
+ * Obtained from Gaussian::toDensity(). Holding a GaussianDensity locks the source
+ * Gaussian; copies share the lock and the last one to be destroyed releases it. A
+ * GaussianDensity must not outlive its source.
  *
- * \sa class MutableGaussian, GaussianN
+ * \sa class Gaussian, GaussianDensityN
  */
 template <typename Scalar_, typename Space_>
-class Gaussian {
+class GaussianDensity {
  public:
-  using MutableType = MutableGaussian<Scalar_, Space_>;
+  using OwnerType = Gaussian<Scalar_, Space_>;
   using SpaceType = Space_;
-  using MomentsType = typename MutableType::MomentsType;
-  using Scalar = typename MutableType::Scalar;
-  using Index = typename MutableType::Index;
-  using VectorType = typename MutableType::VectorType;
-  using MatrixType = typename MutableType::MatrixType;
+  using MomentsType = typename OwnerType::MomentsType;
+  using Scalar = typename OwnerType::Scalar;
+  using Index = typename OwnerType::Index;
+  using VectorType = typename OwnerType::VectorType;
+  using MatrixType = typename OwnerType::MatrixType;
   using LLTType = Eigen::LLT<MatrixType>;
-  static constexpr int SizeAtCompileTime{MutableType::SizeAtCompileTime};
-  static constexpr int MaxSizeAtCompileTime{MutableType::MaxSizeAtCompileTime};
-  static constexpr bool IsMutable{false};
+  static constexpr int SizeAtCompileTime{OwnerType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{OwnerType::MaxSizeAtCompileTime};
+  static constexpr bool IsOwner{false};
 
-  Gaussian(const Gaussian& other) : m_source{other.m_source} { lock(); }
-  Gaussian(Gaussian&& other) noexcept : m_source{std::exchange(other.m_source, nullptr)} {}
+  GaussianDensity(const GaussianDensity& other) : m_source{other.m_source} { lock(); }
+  GaussianDensity(GaussianDensity&& other) noexcept : m_source{std::exchange(other.m_source, nullptr)} {}
 
-  Gaussian& operator=(const Gaussian& other) {
+  GaussianDensity& operator=(const GaussianDensity& other) {
     if (this != &other) {
       unlock();
       m_source = other.m_source;
@@ -384,7 +384,7 @@ class Gaussian {
     return *this;
   }
 
-  Gaussian& operator=(Gaussian&& other) noexcept {
+  GaussianDensity& operator=(GaussianDensity&& other) noexcept {
     if (this != &other) {
       unlock();
       m_source = std::exchange(other.m_source, nullptr);
@@ -392,7 +392,7 @@ class Gaussian {
     return *this;
   }
 
-  ~Gaussian() { unlock(); }
+  ~GaussianDensity() { unlock(); }
 
   [[nodiscard]] Index size() const { return source().size(); }
   [[nodiscard]] const Space_& space() const { return source().space(); }
@@ -453,21 +453,21 @@ class Gaussian {
   /** \returns a read-only view of the entries \a indices. It holds a copy of this
    * view, so the source stays locked while the marginal is alive.
    *
-   * \sa MutableGaussian::marginal()
+   * \sa Gaussian::marginal()
    */
   template <typename Indices>
-  [[nodiscard]] GaussianMarginal<Gaussian, Indices> marginal(const Indices& indices) const {
-    return GaussianMarginal<Gaussian, Indices>{*this, indices};
+  [[nodiscard]] GaussianMarginal<GaussianDensity, Indices> marginal(const Indices& indices) const {
+    return GaussianMarginal<GaussianDensity, Indices>{*this, indices};
   }
 
-  /** marginal() of the subspace named by the tag path \a Path; see MutableGaussian::marginal(). */
+  /** marginal() of the subspace named by the tag path \a Path; see Gaussian::marginal(). */
   template <typename... Path>
     requires(sizeof...(Path) > 0)
   [[nodiscard]] auto marginal() const {
     return internal::tagMarginal<GaussianMarginal, Path...>(*this);
   }
 
-  /** \returns a copy of the conditional distribution; see MutableGaussian::conditional(). */
+  /** \returns a copy of the conditional distribution; see Gaussian::conditional(). */
   template <typename TargetIndices, typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
                                  const Eigen::MatrixBase<Derived>& values) const {
@@ -488,12 +488,12 @@ class Gaussian {
   }
 
  private:
-  friend MutableType;
+  friend OwnerType;
 
-  explicit Gaussian(const MutableType* source) : m_source{source} { lock(); }
+  explicit GaussianDensity(const OwnerType* source) : m_source{source} { lock(); }
 
-  [[nodiscard]] const MutableType& source() const {
-    EIGEN_FILTER_ASSERT(m_source && "use of a moved-from Gaussian");
+  [[nodiscard]] const OwnerType& source() const {
+    EIGEN_FILTER_ASSERT(m_source && "use of a moved-from GaussianDensity");
     return *m_source;
   }
 
@@ -505,20 +505,20 @@ class Gaussian {
     if (m_source) --m_source->m_lockCount;
   }
 
-  const MutableType* m_source;
+  const OwnerType* m_source;
 };
 
-/** \brief Read-only view of a subset of the entries of a MutableGaussian or Gaussian.
+/** \brief Read-only view of a subset of the entries of a Gaussian or GaussianDensity.
  *
- * Obtained from MutableGaussian::marginal() or Gaussian::marginal(). From a
- * MutableGaussian it borrows the source (values may change underneath it, size may
- * not); from a Gaussian it holds a copy of the view, and so the lock.
+ * Obtained from Gaussian::marginal() or GaussianDensity::marginal(). From a
+ * Gaussian it borrows the source (values may change underneath it, size may
+ * not); from a GaussianDensity it holds a copy of the view, and so the lock.
  *
  * mean() and cov() return lazy Eigen expressions that must not outlive the marginal.
  * cov() reads only the source's lower triangle, so it is correct for indices in any
  * order. The dimension is known at compile time when the index set's size is.
  *
- * \tparam Source    MutableGaussian or Gaussian
+ * \tparam Source    Gaussian or GaussianDensity
  * \tparam Indices   the index type passed to marginal()
  * \tparam SubSpace  space of the selected coordinates: the projection of the source's
  *                   space, or a named subspace for marginal<Path...>()
@@ -533,8 +533,8 @@ class GaussianMarginal {
   using SpaceType = SubSpace;
   static constexpr int SizeAtCompileTime{spaceSize<SubSpace>};
   static constexpr int MaxSizeAtCompileTime{spaceMaxSize<SubSpace>};
-  using MutableType = MutableGaussian<Scalar, SubSpace>;
-  using MomentsType = typename MutableType::MomentsType;
+  using OwnerType = Gaussian<Scalar, SubSpace>;
+  using MomentsType = typename OwnerType::MomentsType;
   using IndexVectorType = typename Selection::type;
 
   /** Selects \a indices, projecting the source's space onto them. */
@@ -566,8 +566,8 @@ class GaussianMarginal {
   [[nodiscard]] auto cov() const { return internal::lowerSymmetricBlock(source().cov(), m_indices, m_indices); }
   [[nodiscard]] MomentsType moments() const { return MomentsType{mean(), cov()}; }
 
-  /** \returns an independent MutableGaussian holding this marginal, in its space */
-  [[nodiscard]] MutableType copy() const { return MutableType{m_space, moments()}; }
+  /** \returns an independent Gaussian holding this marginal, in its space */
+  [[nodiscard]] OwnerType copy() const { return OwnerType{m_space, moments()}; }
 
  private:
   [[nodiscard]] const Source& source() const { return m_holder.get(); }
@@ -592,12 +592,12 @@ template <template <typename, typename, typename> typename Marginal, typename...
 
 }  // namespace internal
 
-/** A MutableGaussian of dimension \a Size in a linear space, with storage bound \a MaxSize. */
-template <typename Scalar, int Size, int MaxSize = Size>
-using MutableGaussianN = MutableGaussian<Scalar, Linear<Size, MaxSize>>;
-
-/** A Gaussian view of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+/** A Gaussian of dimension \a Size in a linear space, with storage bound \a MaxSize. */
 template <typename Scalar, int Size, int MaxSize = Size>
 using GaussianN = Gaussian<Scalar, Linear<Size, MaxSize>>;
+
+/** A GaussianDensity of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using GaussianDensityN = GaussianDensity<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter

@@ -15,9 +15,9 @@
 
 using EigenFilter::ComponentError;
 using EigenFilter::GaussianError;
+using EigenFilter::GaussianMixture;
 using EigenFilter::GaussianMixtureError;
-using EigenFilter::MutableGaussianMixture;
-using EigenFilter::MutableGaussianMixtureN;
+using EigenFilter::GaussianMixtureN;
 using EigenFilter::WeightError;
 
 namespace {
@@ -25,13 +25,13 @@ namespace {
 constexpr double inf{std::numeric_limits<double>::infinity()};
 
 // Lets std::vector move rather than copy components on reallocation.
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussianMixtureN<double, Eigen::Dynamic>::Component>);
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussianMixtureN<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<GaussianMixtureN<double, Eigen::Dynamic>::Component>);
+static_assert(std::is_nothrow_move_constructible_v<GaussianMixtureN<double, Eigen::Dynamic>>);
 
-// Each config names a MutableGaussianMixture type and the component dimension to test it at.
+// Each config names a GaussianMixture type and the component dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableGaussianMixtureN<Scalar, Size, MaxSize>;
+  using Type = GaussianMixtureN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -113,7 +113,7 @@ TYPED_TEST_SUITE(GaussianMixtureTest, Configs);
 
 TYPED_TEST(GaussianMixtureTest, LogPdfMatchesReference) {
   const auto mixture{this->make()};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   ASSERT_TRUE(g.has_value());
 
   const auto x{this->makeVector(0.7)};
@@ -125,7 +125,7 @@ TYPED_TEST(GaussianMixtureTest, LogPdfMatchesReference) {
 
 TYPED_TEST(GaussianMixtureTest, MomentsMatchReference) {
   const auto mixture{this->make()};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   ASSERT_TRUE(g.has_value());
 
   const auto [mean, cov]{this->referenceMoments(mixture)};
@@ -136,14 +136,14 @@ TYPED_TEST(GaussianMixtureTest, MomentsMatchReference) {
 
 TYPED_TEST(GaussianMixtureTest, MomentsReadOnlyLowerTriangle) {
   auto mixture{this->make()};
-  const auto expected{mixture.toGaussianMixture()->moments()};
+  const auto expected{mixture.toDensity()->moments()};
 
   for (auto it{mixture.begin()}; it != mixture.end(); ++it) {
     auto cov{it->gaussian.cov()};
     cov.template triangularView<Eigen::StrictlyUpper>().setConstant(12345);
     mixture.setCov(it, cov);
   }
-  const auto moments{mixture.toGaussianMixture()->moments()};
+  const auto moments{mixture.toDensity()->moments()};
   EXPECT_EQ(moments.mean(), expected.mean());
   EXPECT_EQ(moments.cov(), expected.cov());
 }
@@ -152,10 +152,10 @@ TYPED_TEST(GaussianMixtureTest, WeightScaleDoesNotChangeDensity) {
   using Scalar = typename TestFixture::Scalar;
   auto mixture{this->make()};
   const auto x{this->makeVector(0.7)};
-  const auto logPdf{mixture.toGaussianMixture()->logPdf(x)};
+  const auto logPdf{mixture.toDensity()->logPdf(x)};
 
   mixture.scaleWeights(Scalar(5));
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   EXPECT_NEAR(g->logPdf(x), logPdf, this->tolerance() * std::abs(logPdf));
   EXPECT_NEAR(g->logTotalWeight(), std::log(2.0) + 5.0, this->tolerance() * 10);
 }
@@ -164,20 +164,19 @@ TYPED_TEST(GaussianMixtureTest, EffectiveSampleSize) {
   using Scalar = typename TestFixture::Scalar;
   auto mixture{this->make()};
   // Normalized weights 0.1, 0.75, 0.15.
-  EXPECT_NEAR(mixture.toGaussianMixture()->effectiveSampleSize(), Scalar(1 / (0.01 + 0.5625 + 0.0225)),
-              this->tolerance() * 10);
+  EXPECT_NEAR(mixture.toDensity()->effectiveSampleSize(), Scalar(1 / (0.01 + 0.5625 + 0.0225)), this->tolerance() * 10);
 
   for (auto it{mixture.begin()}; it != mixture.end(); ++it) mixture.setLogWeight(it, Scalar(2));
-  EXPECT_NEAR(mixture.toGaussianMixture()->effectiveSampleSize(), Scalar(3), this->tolerance() * 10);
+  EXPECT_NEAR(mixture.toDensity()->effectiveSampleSize(), Scalar(3), this->tolerance() * 10);
 
   mixture.setLogWeight(mixture.begin(), -Eigen::NumTraits<Scalar>::infinity());
   mixture.setLogWeight(mixture.begin() + 1, -Eigen::NumTraits<Scalar>::infinity());
-  EXPECT_EQ(mixture.toGaussianMixture()->effectiveSampleSize(), Scalar(1));
+  EXPECT_EQ(mixture.toDensity()->effectiveSampleSize(), Scalar(1));
 }
 
 namespace {
 
-using MGM2 = MutableGaussianMixtureN<double, 2>;
+using MGM2 = GaussianMixtureN<double, 2>;
 
 // A 2-D mixture with the given weights, each component at a distinct mean.
 MGM2 makeWeighted(const std::vector<double>& weights) {
@@ -199,45 +198,45 @@ void expectWeights(const MGM2& mixture, const std::vector<double>& expected) {
 
 }  // namespace
 
-TEST(GaussianMixture, EmptyFails) {
+TEST(GaussianMixtureDensity, EmptyFails) {
   const MGM2 mixture;
   EXPECT_EQ(mixture.logTotalWeight().error(), WeightError::Empty);
-  EXPECT_EQ(mixture.toGaussianMixture().error(), GaussianMixtureError{WeightError::Empty});
+  EXPECT_EQ(mixture.toDensity().error(), GaussianMixtureError{WeightError::Empty});
 }
 
-TEST(GaussianMixture, ZeroWeightFails) {
+TEST(GaussianMixtureDensity, ZeroWeightFails) {
   auto mixture{makeWeighted({1.0, 1.0})};
   mixture.scaleWeights(-inf);
-  EXPECT_EQ(mixture.toGaussianMixture().error(), GaussianMixtureError{WeightError::ZeroSum});
+  EXPECT_EQ(mixture.toDensity().error(), GaussianMixtureError{WeightError::ZeroSum});
 }
 
-TEST(GaussianMixture, NonFiniteWeightFails) {
+TEST(GaussianMixtureDensity, NonFiniteWeightFails) {
   auto mixture{makeWeighted({1.0, 1.0})};
   mixture.setLogWeight(mixture.begin(), std::numeric_limits<double>::quiet_NaN());
-  EXPECT_EQ(mixture.toGaussianMixture().error(), GaussianMixtureError{WeightError::NonFinite});
+  EXPECT_EQ(mixture.toDensity().error(), GaussianMixtureError{WeightError::NonFinite});
   mixture.setLogWeight(mixture.begin(), inf);
-  EXPECT_EQ(mixture.toGaussianMixture().error(), GaussianMixtureError{WeightError::NonFinite});
+  EXPECT_EQ(mixture.toDensity().error(), GaussianMixtureError{WeightError::NonFinite});
 }
 
-TEST(GaussianMixture, ComponentFailureNamesComponent) {
+TEST(GaussianMixtureDensity, ComponentFailureNamesComponent) {
   auto mixture{makeWeighted({1.0, 1.0, 1.0})};
   mixture.setCov(mixture.begin() + 1, -Eigen::Matrix2d::Identity());
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   ASSERT_FALSE(g.has_value());
   EXPECT_EQ(g.error(), GaussianMixtureError{(ComponentError{1, GaussianError::NotPositiveDefinite})});
 }
 
-TEST(GaussianMixture, ZeroWeightComponentIsIgnored) {
+TEST(GaussianMixtureDensity, ZeroWeightComponentIsIgnored) {
   auto mixture{makeWeighted({1.0, 1.0})};
   mixture.setLogWeight(mixture.begin(), -inf);
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   ASSERT_TRUE(g.has_value());
   const auto moments{g->moments()};
   EXPECT_EQ(moments.mean(), Eigen::Vector2d::Constant(1.0));
   EXPECT_EQ(moments.cov(), Eigen::Matrix2d::Identity());
 }
 
-TEST(GaussianMixture, RemoveMovesLastIntoPlace) {
+TEST(GaussianMixtureDensity, RemoveMovesLastIntoPlace) {
   auto mixture{makeWeighted({1.0, 2.0, 3.0})};
   const auto next{mixture.remove(mixture.begin())};
   EXPECT_EQ(mixture.size(), 2);
@@ -247,7 +246,7 @@ TEST(GaussianMixture, RemoveMovesLastIntoPlace) {
   EXPECT_EQ(last, mixture.end());
 }
 
-TEST(GaussianMixture, ForEachScalesWeightsAndModifiesComponents) {
+TEST(GaussianMixtureDensity, ForEachScalesWeightsAndModifiesComponents) {
   auto mixture{makeWeighted({1.0, 2.0})};
   mixture.forEach([](auto& c) {
     c.setMean(Eigen::Vector2d::Zero());
@@ -261,7 +260,7 @@ TEST(GaussianMixture, ForEachScalesWeightsAndModifiesComponents) {
   for (const auto& c : mixture) EXPECT_EQ(c.gaussian.cov(), 2.0 * Eigen::Matrix2d::Identity());
 }
 
-TEST(GaussianMixture, MergeSumsWeights) {
+TEST(GaussianMixtureDensity, MergeSumsWeights) {
   auto mixture{makeWeighted({1.0, 3.0, 5.0})};
   const EigenFilter::MomentsN<double, 2> merged{Eigen::Vector2d{7.0, 8.0}, Eigen::Matrix2d::Identity()};
   const auto it{mixture.merge(mixture.begin(), mixture.begin() + 1, merged)};
@@ -271,7 +270,7 @@ TEST(GaussianMixture, MergeSumsWeights) {
   expectWeights(mixture, {4.0, 5.0});
 }
 
-TEST(GaussianMixture, MergeIntoLastComponent) {
+TEST(GaussianMixtureDensity, MergeIntoLastComponent) {
   auto mixture{makeWeighted({1.0, 3.0, 5.0})};
   const auto last{mixture.begin() + 2};
   const auto it{mixture.merge(last, mixture.begin(), last->gaussian.moments())};
@@ -280,7 +279,7 @@ TEST(GaussianMixture, MergeIntoLastComponent) {
   EXPECT_EQ(it->gaussian.mean(), Eigen::Vector2d::Constant(2.0));
 }
 
-TEST(GaussianMixture, SplitRedistributesWeight) {
+TEST(GaussianMixtureDensity, SplitRedistributesWeight) {
   auto mixture{makeWeighted({6.0, 1.0})};
   const EigenFilter::MomentsN<double, 2> a{Eigen::Vector2d{-1.0, 0.0}, Eigen::Matrix2d::Identity()};
   const EigenFilter::MomentsN<double, 2> b{Eigen::Vector2d{1.0, 0.0}, Eigen::Matrix2d::Identity()};
@@ -295,7 +294,7 @@ TEST(GaussianMixture, SplitRedistributesWeight) {
   EXPECT_NEAR(*mixture.logTotalWeight(), std::log(7.0), 1e-12);
 }
 
-TEST(GaussianMixture, RemoveIf) {
+TEST(GaussianMixtureDensity, RemoveIf) {
   auto mixture{makeWeighted({1.0, 5.0, 2.0, 4.0, 3.0})};
   const auto light{[](const MGM2::Component& c) { return c.logWeight < std::log(2.5); }};
 
@@ -309,7 +308,7 @@ TEST(GaussianMixture, RemoveIf) {
   expectWeights(mixture, {3.0, 4.0, 5.0});
 }
 
-TEST(GaussianMixture, RemoveIfReturningWeightFailsWithoutRemoving) {
+TEST(GaussianMixtureDensity, RemoveIfReturningWeightFailsWithoutRemoving) {
   auto mixture{makeWeighted({1.0, 1.0})};
   mixture.scaleWeights(-inf);
   const auto removed{mixture.removeIf<true>([](const auto&) { return true; })};
@@ -320,7 +319,7 @@ TEST(GaussianMixture, RemoveIfReturningWeightFailsWithoutRemoving) {
   EXPECT_TRUE(mixture.empty());
 }
 
-TEST(GaussianMixture, TruncateKeepsHeaviest) {
+TEST(GaussianMixtureDensity, TruncateKeepsHeaviest) {
   auto mixture{makeWeighted({1.0, 5.0, 2.0, 4.0, 3.0})};
   auto copy{mixture};
   copy.truncate(3);
@@ -336,7 +335,7 @@ TEST(GaussianMixture, TruncateKeepsHeaviest) {
   EXPECT_EQ(mixture.size(), 3);
 }
 
-TEST(GaussianMixture, RemoveLightest) {
+TEST(GaussianMixtureDensity, RemoveLightest) {
   auto mixture{makeWeighted({1.0, 5.0, 2.0, 4.0, 3.0})};
   const auto removed{mixture.removeLightest(std::log(0.25))};
   ASSERT_TRUE(removed.has_value());
@@ -346,14 +345,14 @@ TEST(GaussianMixture, RemoveLightest) {
   EXPECT_EQ(MGM2{}.removeLightest(0.0).error(), WeightError::Empty);
 }
 
-TEST(GaussianMixture, Normalize) {
+TEST(GaussianMixtureDensity, Normalize) {
   auto mixture{makeWeighted({1.0, 3.0})};
   ASSERT_TRUE(mixture.normalize().has_value());
   EXPECT_NEAR(*mixture.logTotalWeight(), 0.0, 1e-15);
   EXPECT_NEAR(std::exp(mixture.begin()->logWeight), 0.25, 1e-15);
 }
 
-TEST(GaussianMixture, AssignAndAppend) {
+TEST(GaussianMixtureDensity, AssignAndAppend) {
   using Moments = EigenFilter::MomentsN<double, 2>;
   MGM2 mixture;
   const std::vector components{std::pair{0.0, Moments{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()}},
@@ -367,8 +366,8 @@ TEST(GaussianMixture, AssignAndAppend) {
   EXPECT_EQ((mixture.begin() + 3)->gaussian.mean(), Eigen::Vector2d::Ones());
 }
 
-TEST(GaussianMixture, ResizeComponentsDynamic) {
-  MutableGaussianMixtureN<double, Eigen::Dynamic> mixture{2};
+TEST(GaussianMixtureDensity, ResizeComponentsDynamic) {
+  GaussianMixtureN<double, Eigen::Dynamic> mixture{2};
   mixture.add(0.0, Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity());
   EXPECT_EQ(mixture.componentSize(), 2);
 
@@ -377,15 +376,15 @@ TEST(GaussianMixture, ResizeComponentsDynamic) {
   mixture.setMean(mixture.begin(), Eigen::Vector3d::Zero());
   mixture.setCov(mixture.begin(), Eigen::Matrix3d::Identity());
   mixture.add(0.0, Eigen::Vector3d::Ones(), Eigen::Matrix3d::Identity());
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   ASSERT_TRUE(g.has_value());
   EXPECT_EQ(g->moments().mean(), Eigen::Vector3d::Constant(0.5));
 }
 
-TEST(GaussianMixture, LockReleasedWhenViewsDie) {
+TEST(GaussianMixtureDensity, LockReleasedWhenViewsDie) {
   auto mixture{makeWeighted({1.0, 2.0})};
   {
-    auto g{mixture.toGaussianMixture()};
+    auto g{mixture.toDensity()};
     auto copy{*g};
     auto moved{std::move(*g)};
   }
@@ -398,7 +397,7 @@ TEST(GaussianMixture, LockReleasedWhenViewsDie) {
 
 TEST(GaussianMixtureDeathTest, MutateWhileLocked) {
   auto mixture{makeWeighted({1.0, 2.0})};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   EXPECT_DEATH(mixture.add(0.0, Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()), "locked");
   EXPECT_DEATH(mixture.remove(mixture.begin()), "locked");
   EXPECT_DEATH(mixture.setMean(mixture.begin(), Eigen::Vector2d::Zero()), "locked");
@@ -415,7 +414,7 @@ TEST(GaussianMixtureDeathTest, MutateMixtureInsideForEach) {
 
 TEST(GaussianMixtureDeathTest, MoveWhileLocked) {
   auto mixture{makeWeighted({1.0, 2.0})};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   EXPECT_DEATH({ auto stolen{std::move(mixture)}; }, "locked");
 }
 
@@ -423,7 +422,7 @@ TEST(GaussianMixtureDeathTest, DestroyWhileLocked) {
   EXPECT_DEATH(
       {
         auto mixture{std::make_unique<MGM2>(makeWeighted({1.0}))};
-        auto g{mixture->toGaussianMixture()};
+        auto g{mixture->toDensity()};
         mixture.reset();
       },
       "locked");

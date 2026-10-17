@@ -39,6 +39,31 @@ class Borrow {
   const Source* m_source;
 };
 
+/** Holds a lock on a mutable object: while any Lock is alive, the object must not
+ * change, move, or be destroyed. \a Source must befriend Lock and have a \c mutable
+ * \c int \c m_lockCount.
+ */
+template <typename Source>
+class Lock {
+ public:
+  explicit Lock(const Source& source) : m_source{&source} { ++m_source->m_lockCount; }
+  Lock(const Lock& other) : m_source{other.m_source} { ++m_source->m_lockCount; }
+
+  Lock& operator=(const Lock& other) {
+    ++other.m_source->m_lockCount;
+    --m_source->m_lockCount;
+    m_source = other.m_source;
+    return *this;
+  }
+
+  ~Lock() { --m_source->m_lockCount; }
+
+  [[nodiscard]] const Source& get() const { return *m_source; }
+
+ private:
+  const Source* m_source;
+};
+
 /** Holds a copy of a read-only view, and with it the view's lock. */
 template <typename View>
 class ViewHolder {
@@ -53,7 +78,7 @@ class ViewHolder {
 
 /** A Borrow for mutable sources, a ViewHolder for read-only views. */
 template <typename Source>
-using HolderFor = std::conditional_t<Source::IsMutable, Borrow<Source>, ViewHolder<Source>>;
+using HolderFor = std::conditional_t<Source::IsOwner, Borrow<Source>, ViewHolder<Source>>;
 
 /** A plain Eigen matrix with the storage order Eigen requires for single-row matrices. */
 template <typename Scalar, int Rows, int Cols, int MaxRows, int MaxCols>

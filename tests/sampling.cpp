@@ -9,15 +9,15 @@
 #include <random>
 #include <type_traits>
 
-using EigenFilter::MutableGaussian;
-using EigenFilter::MutableGaussianN;
+using EigenFilter::Gaussian;
+using EigenFilter::GaussianN;
 
 namespace {
 
-// Each config names a MutableGaussian type and the dimension to test it at.
+// Each config names a Gaussian type and the dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableGaussianN<Scalar, Size, MaxSize>;
+  using Type = GaussianN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -54,7 +54,7 @@ TYPED_TEST_SUITE(SamplingTest, Configs);
 
 TYPED_TEST(SamplingTest, SampleMomentsConverge) {
   const auto mg{this->make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   ASSERT_TRUE(g.has_value());
   std::mt19937_64 rng{7};
   constexpr Eigen::Index count{40000};
@@ -76,7 +76,7 @@ TYPED_TEST(SamplingTest, SampleMomentsConverge) {
 TYPED_TEST(SamplingTest, LogPdfMatchesGaussian) {
   using Scalar = typename TestFixture::Scalar;
   const auto mg{this->make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   std::mt19937_64 rng{11};
   const auto drawn{EigenFilter::drawSamplesWithLogPdf(*g, 50, rng)};
   ASSERT_EQ(drawn.logPdf.size(), 50);
@@ -89,26 +89,26 @@ TYPED_TEST(SamplingTest, LogPdfMatchesGaussian) {
 
 TYPED_TEST(SamplingTest, BothVersionsDrawTheSameSamples) {
   const auto mg{this->make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   std::mt19937_64 a{3};
   std::mt19937_64 b{3};
   EXPECT_EQ(EigenFilter::drawSamples(*g, 20, a), EigenFilter::drawSamplesWithLogPdf(*g, 20, b).samples);
 }
 
 TEST(Sampling, FeedsParticleSet) {
-  const MutableGaussianN<double, 2> mg{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()};
+  const GaussianN<double, 2> mg{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()};
   std::mt19937_64 rng{5};
-  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*mg.toGaussian(), 10, rng)};
+  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*mg.toDensity(), 10, rng)};
   // Importance weights for a uniform target, as a particle filter proposal would use.
-  const EigenFilter::MutableParticleSetN<double, 2> set{drawn.samples, -drawn.logPdf};
+  const EigenFilter::ParticleSetN<double, 2> set{drawn.samples, -drawn.logPdf};
   EXPECT_EQ(set.size(), 10);
   EXPECT_TRUE((set.logWeights() == -drawn.logPdf).all());
 }
 
 TEST(Sampling, ZeroSamples) {
-  const MutableGaussianN<double, Eigen::Dynamic> mg{Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
+  const GaussianN<double, Eigen::Dynamic> mg{Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
   std::mt19937_64 rng{5};
-  const auto samples{EigenFilter::drawSamples(*mg.toGaussian(), 0, rng)};
+  const auto samples{EigenFilter::drawSamples(*mg.toDensity(), 0, rng)};
   EXPECT_EQ(samples.rows(), 3);
   EXPECT_EQ(samples.cols(), 0);
 }
@@ -116,8 +116,8 @@ TEST(Sampling, ZeroSamples) {
 namespace {
 
 // Three well-separated, narrow 2-D components with unnormalized weights 1, 2, 5.
-EigenFilter::MutableGaussianMixtureN<double, 2> makeSeparatedMixture(double spread) {
-  EigenFilter::MutableGaussianMixtureN<double, 2> mixture;
+EigenFilter::GaussianMixtureN<double, 2> makeSeparatedMixture(double spread) {
+  EigenFilter::GaussianMixtureN<double, 2> mixture;
   const Eigen::Matrix2d cov{{spread, 0.3 * spread}, {0.3 * spread, 0.5 * spread}};
   mixture.add(std::log(1.0), Eigen::Vector2d{-10.0, 0.0}, cov);
   mixture.add(std::log(2.0), Eigen::Vector2d{0.0, 10.0}, cov);
@@ -129,7 +129,7 @@ EigenFilter::MutableGaussianMixtureN<double, 2> makeSeparatedMixture(double spre
 
 TEST(MixtureSampling, SampleMomentsConverge) {
   const auto mixture{makeSeparatedMixture(4.0)};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   ASSERT_TRUE(g.has_value());
   std::mt19937_64 rng{23};
   constexpr Eigen::Index count{40000};
@@ -148,7 +148,7 @@ TEST(MixtureSampling, SampleMomentsConverge) {
 
 TEST(MixtureSampling, SystematicGivesEachComponentItsShare) {
   const auto mixture{makeSeparatedMixture(0.01)};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   std::mt19937_64 rng{29};
   const auto samples{EigenFilter::drawSamples(*g, 80, rng, EigenFilter::SystematicResampler{})};
   std::array<int, 3> counts{};
@@ -162,7 +162,7 @@ TEST(MixtureSampling, SystematicGivesEachComponentItsShare) {
 
 TEST(MixtureSampling, LogPdfMatchesMixture) {
   const auto mixture{makeSeparatedMixture(4.0)};
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   std::mt19937_64 a{31};
   std::mt19937_64 b{31};
   const auto drawn{EigenFilter::drawSamplesWithLogPdf(*g, 25, a)};

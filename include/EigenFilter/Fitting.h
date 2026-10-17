@@ -24,7 +24,8 @@ namespace EigenFilter {
 
 /** Reasons fitMixture() can fail. */
 enum class FitError {
-  Degenerate,  ///< the source has no spread in some dimension, e.g. every particle has the same state
+  Degenerate,      ///< the source has no spread in some dimension, e.g. every particle has the same state
+  InvalidWeights,  ///< the particles' weights cannot be normalized (see ParticleSet::logTotalWeight())
 };
 
 /** Options for fitMixture(). */
@@ -51,10 +52,10 @@ struct FitOptions {
  */
 template <typename Scalar, typename Space>
 struct MixtureFit {
-  MutableGaussianMixture<Scalar, Space> mixture;  ///< fitted mixture, weights normalized to one
-  Scalar logLikelihood;                           ///< weighted log-likelihood of the source under \c mixture
-  int iterations;                                 ///< E-steps performed
-  bool converged;                                 ///< whether \c tolerance was reached before \c maxIterations
+  GaussianMixture<Scalar, Space> mixture;  ///< fitted mixture, weights normalized to one
+  Scalar logLikelihood;                    ///< weighted log-likelihood of the source under \c mixture
+  int iterations;                          ///< E-steps performed
+  bool converged;                          ///< whether \c tolerance was reached before \c maxIterations
 };
 
 /** MixtureFit of dimension \a Size in a linear space, with storage bound \a MaxSize. */
@@ -75,12 +76,14 @@ struct FitSource {
 };
 
 template <typename Scalar, typename Space>
-[[nodiscard]] FitSource<Scalar, Space> fitSource(const ParticleSet<Scalar, Space>& particles) {
-  return {particles.states(), particles.normalizedWeights(), {}, {}, particles.space()};
+[[nodiscard]] std::expected<FitSource<Scalar, Space>, FitError> fitSource(const ParticleSet<Scalar, Space>& particles) {
+  auto weights{particles.normalizedWeights()};
+  if (!weights) return std::unexpected{FitError::InvalidWeights};
+  return FitSource<Scalar, Space>{particles.states(), std::move(*weights), {}, {}, particles.space()};
 }
 
 template <typename Scalar, typename Space>
-[[nodiscard]] FitSource<Scalar, Space> fitSource(const GaussianMixture<Scalar, Space>& mixture) {
+[[nodiscard]] FitSource<Scalar, Space> fitSource(const GaussianMixtureDensity<Scalar, Space>& mixture) {
   using MatrixType = typename FitSource<Scalar, Space>::MatrixType;
   FitSource<Scalar, Space> source{SampleSet<Scalar, Space>{mixture.componentSize(), mixture.size()},
                                   Eigen::Array<Scalar, Eigen::Dynamic, 1>{mixture.size()},
@@ -91,7 +94,7 @@ template <typename Scalar, typename Space>
   source.covFactors.reserve(std::size_t(mixture.size()));
   Eigen::Index i{0};
   for (const auto& component : mixture) {
-    const auto gaussian{component.gaussian.toGaussian()};
+    const auto gaussian{component.gaussian.toDensity()};
     source.points.col(i) = gaussian->mean();
     source.weights(i) = Eigen::numext::exp(component.logWeight - mixture.logTotalWeight());
     const MatrixType factor{gaussian->llt().matrixL()};
@@ -309,7 +312,7 @@ class MixtureFitter {
   }
 
   [[nodiscard]] Result result(Scalar logLikelihood, int iterations, bool converged) const {
-    MutableGaussianMixture<Scalar, Space> mixture{m_source.space, m_source.points.rows()};
+    GaussianMixture<Scalar, Space> mixture{m_source.space, m_source.points.rows()};
     mixture.reserve(Eigen::Index(m_means.size()));
     for (std::size_t k{0}; k < m_means.size(); ++k) mixture.add(m_logWeights[k], m_means[k], m_covs[k]);
     return {std::move(mixture), logLikelihood, iterations, converged};
@@ -334,15 +337,17 @@ class MixtureFitter {
  * FitOptions::minLogWeight). The result is in the particles' space. Costs
  * O(iterations · size() · k · d²).
  *
- * \returns the fit, or FitError::Degenerate if the particles have no spread in some dimension
+ * \returns the fit; FitError::Degenerate if the particles have no spread in some
+ *          dimension; or FitError::InvalidWeights if their weights cannot be normalized
  */
 template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
 [[nodiscard]] std::expected<MixtureFit<Scalar, Space>, FitError> fitMixture(const ParticleSet<Scalar, Space>& particles,
                                                                             Eigen::Index k, G& rng,
                                                                             const FitOptions<Scalar>& options = {}) {
   const auto source{internal::fitSource(particles)};
-  internal::MixtureFitter<Scalar, Space> fitter{source, options};
-  return fitter.run(source.points, source.weights, k, rng);
+  if (!source) return std::unexpected{source.error()};
+  internal::MixtureFitter<Scalar, Space> fitter{*source, options};
+  return fitter.run(source->points, source->weights, k, rng);
 }
 
 /** \returns a mixture of at most \a k Gaussians fitted to \a mixture by hierarchical EM.
@@ -356,7 +361,8 @@ template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
  */
 template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
 [[nodiscard]] std::expected<MixtureFit<Scalar, Space>, FitError> fitMixture(
-    const GaussianMixture<Scalar, Space>& mixture, Eigen::Index k, G& rng, const FitOptions<Scalar>& options = {}) {
+    const GaussianMixtureDensity<Scalar, Space>& mixture, Eigen::Index k, G& rng,
+    const FitOptions<Scalar>& options = {}) {
   const auto source{internal::fitSource(mixture)};
   internal::MixtureFitter<Scalar, Space> fitter{source, options};
   return fitter.run(source.points, source.weights, k, rng);
@@ -368,15 +374,17 @@ template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
  *
  * Useful when the particles were drawn from \a seedsFrom: its components summarize the
  * particles and are far fewer, so seeding is cheaper and starts EM closer to the answer.
+ * Fails as fitMixture(const ParticleSet&, Eigen::Index, G&, const FitOptions&) does.
  */
 template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
 [[nodiscard]] std::expected<MixtureFit<Scalar, Space>, FitError> fitMixture(
-    const ParticleSet<Scalar, Space>& particles, const GaussianMixture<Scalar, Space>& seedsFrom, Eigen::Index k,
+    const ParticleSet<Scalar, Space>& particles, const GaussianMixtureDensity<Scalar, Space>& seedsFrom, Eigen::Index k,
     G& rng, const FitOptions<Scalar>& options = {}) {
   EIGEN_FILTER_ASSERT(particles.space() == seedsFrom.space() && "the particles and seeds must share a space");
   const auto source{internal::fitSource(particles)};
+  if (!source) return std::unexpected{source.error()};
   const auto seeds{internal::fitSource(seedsFrom)};
-  internal::MixtureFitter<Scalar, Space> fitter{source, options};
+  internal::MixtureFitter<Scalar, Space> fitter{*source, options};
   return fitter.run(seeds.points, seeds.weights, k, rng);
 }
 

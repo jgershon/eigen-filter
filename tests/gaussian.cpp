@@ -11,20 +11,20 @@
 #include <optional>
 #include <type_traits>
 
+using EigenFilter::Gaussian;
 using EigenFilter::GaussianError;
-using EigenFilter::MutableGaussian;
-using EigenFilter::MutableGaussianN;
+using EigenFilter::GaussianN;
 
 namespace {
 
 // Lets std::vector move rather than copy on reallocation.
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussianN<double, Eigen::Dynamic>>);
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussianN<double, 3>>);
+static_assert(std::is_nothrow_move_constructible_v<GaussianN<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<GaussianN<double, 3>>);
 
-// Each config names a MutableGaussian type and the runtime dimension to test it at.
+// Each config names a Gaussian type and the runtime dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableGaussianN<Scalar, Size, MaxSize>;
+  using Type = GaussianN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -73,7 +73,7 @@ TYPED_TEST_SUITE(GaussianTest, Configs);
 
 TYPED_TEST(GaussianTest, LogPdfMatchesReference) {
   const auto mg{this->make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   ASSERT_TRUE(g.has_value());
 
   const auto x{this->makeVector(0.7)};
@@ -85,7 +85,7 @@ TYPED_TEST(GaussianTest, LogPdfMatchesReference) {
 
 TYPED_TEST(GaussianTest, PeakIsAtMean) {
   const auto mg{this->make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   ASSERT_TRUE(g.has_value());
   EXPECT_EQ(g->wsse(mg.mean()), 0);
   EXPECT_EQ(g->logPdf(mg.mean()), g->logPeak());
@@ -94,20 +94,20 @@ TYPED_TEST(GaussianTest, PeakIsAtMean) {
 TYPED_TEST(GaussianTest, ReadsOnlyLowerTriangle) {
   auto mg{this->make()};
   const auto x{this->makeVector(0.7)};
-  const auto expected{mg.toGaussian()->logPdf(x)};
+  const auto expected{mg.toDensity()->logPdf(x)};
 
   auto cov{mg.cov()};
   cov.template triangularView<Eigen::StrictlyUpper>().setConstant(12345);
   mg.setCov(cov);
-  EXPECT_EQ(mg.toGaussian()->logPdf(x), expected);
+  EXPECT_EQ(mg.toDensity()->logPdf(x), expected);
 }
 
 TYPED_TEST(GaussianTest, MeanChangeKeepsFactorization) {
   auto mg{this->make()};
-  const auto logPeak{mg.toGaussian()->logPeak()};
+  const auto logPeak{mg.toDensity()->logPeak()};
 
   mg.setMean(this->makeVector(2.0));
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   EXPECT_EQ(g->logPeak(), logPeak);
   EXPECT_EQ(g->logPdf(this->makeVector(2.0)), logPeak);
 }
@@ -115,18 +115,18 @@ TYPED_TEST(GaussianTest, MeanChangeKeepsFactorization) {
 TYPED_TEST(GaussianTest, CovChangeRefactorizes) {
   using Scalar = typename TestFixture::Scalar;
   auto mg{this->make()};
-  const auto logDet{mg.toGaussian()->logDeterminant()};
+  const auto logDet{mg.toDensity()->logDeterminant()};
 
   mg.setCov(mg.cov() * Scalar(4));
   const auto expected{logDet + Scalar(this->n) * std::log(Scalar(4))};
-  EXPECT_NEAR(mg.toGaussian()->logDeterminant(), expected, this->tolerance() * 10);
+  EXPECT_NEAR(mg.toDensity()->logDeterminant(), expected, this->tolerance() * 10);
 }
 
 TYPED_TEST(GaussianTest, NotPositiveDefinite) {
   using MatrixType = typename TestFixture::MatrixType;
   auto mg{this->make()};
   mg.setCov(-MatrixType::Identity(this->n, this->n));
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   ASSERT_FALSE(g.has_value());
   EXPECT_EQ(g.error(), GaussianError::NotPositiveDefinite);
 }
@@ -137,7 +137,7 @@ TYPED_TEST(GaussianTest, NonFinite) {
   auto cov{mg.cov()};
   cov(this->n - 1, 0) = std::numeric_limits<Scalar>::quiet_NaN();
   mg.setCov(cov);
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   ASSERT_FALSE(g.has_value());
   EXPECT_EQ(g.error(), GaussianError::NonFinite);
 }
@@ -146,9 +146,9 @@ TYPED_TEST(GaussianTest, RecoversAfterFailure) {
   using MatrixType = typename TestFixture::MatrixType;
   auto mg{this->make()};
   mg.setCov(-MatrixType::Identity(this->n, this->n));
-  ASSERT_FALSE(mg.toGaussian().has_value());
+  ASSERT_FALSE(mg.toDensity().has_value());
   mg.setCov(this->makeSpd());
-  EXPECT_TRUE(mg.toGaussian().has_value());
+  EXPECT_TRUE(mg.toDensity().has_value());
 }
 
 TYPED_TEST(GaussianTest, FactorizeDoesNotLock) {
@@ -166,7 +166,7 @@ TYPED_TEST(GaussianTest, FactorizeDoesNotLock) {
 TYPED_TEST(GaussianTest, LockReleasedWhenViewsDie) {
   auto mg{this->make()};
   {
-    auto g{mg.toGaussian()};
+    auto g{mg.toDensity()};
     auto copy{*g};
     auto moved{std::move(*g)};
   }
@@ -176,23 +176,23 @@ TYPED_TEST(GaussianTest, LockReleasedWhenViewsDie) {
 
 TYPED_TEST(GaussianTest, CopyOfLockedSourceIsUnlocked) {
   auto mg{this->make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   auto copy{mg};
   copy.setCov(copy.cov());  // would assert if the lock were copied
-  EXPECT_EQ(copy.toGaussian()->logPeak(), g->logPeak());
+  EXPECT_EQ(copy.toDensity()->logPeak(), g->logPeak());
 }
 
-TEST(Gaussian, ResizeDynamic) {
-  MutableGaussianN<double, Eigen::Dynamic> mg{2};
+TEST(GaussianDensity, ResizeDynamic) {
+  GaussianN<double, Eigen::Dynamic> mg{2};
   mg.setMean(Eigen::Vector2d::Zero());
   mg.setCov(Eigen::Matrix2d::Identity());
-  ASSERT_TRUE(mg.toGaussian().has_value());
+  ASSERT_TRUE(mg.toDensity().has_value());
 
   mg.resize(3);
   EXPECT_EQ(mg.size(), 3);
   mg.setMean(Eigen::Vector3d::Zero());
   mg.setCov(Eigen::Matrix3d::Identity() * 2.0);
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   ASSERT_TRUE(g.has_value());
   EXPECT_EQ(g->size(), 3);
   EXPECT_NEAR(g->logDeterminant(), 3.0 * std::log(2.0), 1e-12);
@@ -202,13 +202,13 @@ TEST(Gaussian, ResizeDynamic) {
 
 class GaussianDeathTest : public ::testing::Test {
  protected:
-  using MG = MutableGaussianN<double, 2>;
+  using MG = GaussianN<double, 2>;
   static MG make() { return MG{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()}; }
 };
 
 TEST_F(GaussianDeathTest, MutateWhileLocked) {
   auto mg{make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   EXPECT_DEATH(mg.setCov(Eigen::Matrix2d::Identity()), "locked");
   EXPECT_DEATH(mg.setMean(Eigen::Vector2d::Zero()), "locked");
   EXPECT_DEATH(mg.resize(2), "locked");
@@ -216,9 +216,9 @@ TEST_F(GaussianDeathTest, MutateWhileLocked) {
 
 TEST_F(GaussianDeathTest, CopyOfViewKeepsLock) {
   auto mg{make()};
-  std::optional<MG::GaussianType> copy;
+  std::optional<MG::DensityType> copy;
   {
-    const auto g{mg.toGaussian()};
+    const auto g{mg.toDensity()};
     copy.emplace(*g);
   }
   EXPECT_DEATH(mg.setCov(Eigen::Matrix2d::Identity()), "locked");
@@ -226,7 +226,7 @@ TEST_F(GaussianDeathTest, CopyOfViewKeepsLock) {
 
 TEST_F(GaussianDeathTest, MoveWhileLocked) {
   auto mg{make()};
-  const auto g{mg.toGaussian()};
+  const auto g{mg.toDensity()};
   EXPECT_DEATH({ auto stolen{std::move(mg)}; }, "locked");
 }
 
@@ -234,7 +234,7 @@ TEST_F(GaussianDeathTest, DestroyWhileLocked) {
   EXPECT_DEATH(
       {
         auto mg{std::make_unique<MG>(make())};
-        auto g{mg->toGaussian()};
+        auto g{mg->toDensity()};
         mg.reset();
       },
       "locked");
