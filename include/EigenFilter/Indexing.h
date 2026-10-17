@@ -10,6 +10,7 @@
 #include <Eigen/Cholesky>
 
 #include "Macros.h"
+#include "Space.h"
 
 namespace EigenFilter::internal {
 
@@ -151,23 +152,26 @@ struct ConditionedMoments {
 /** Conditions the Gaussian with mean \a mean and (lower-triangle) covariance \a cov
  * on the entries \a given equal to \a values, for the entries \a target.
  *
- * Solves against \f$ \Sigma_{bb} \f$ with a pivoted LDLT, which always produces a
- * result; if the source is numerically singular, the conditional covariance may not
- * be numerically positive definite.
+ * The residual \f$ v \boxminus \mu_b \f$ is normalized by \a givenSpace and the
+ * conditional mean \f$ \mu_a \boxplus K r \f$ by \a targetSpace. Solves against
+ * \f$ \Sigma_{bb} \f$ with a pivoted LDLT, which always produces a result; if the source
+ * is numerically singular, the conditional covariance may not be numerically positive
+ * definite.
  */
 template <typename MeanDerived, typename CovDerived, typename ValuesDerived, int TargetSize, int TargetMaxSize,
-          int GivenSize, int GivenMaxSize>
+          int GivenSize, int GivenMaxSize, typename GivenSpace, typename TargetSpace>
 [[nodiscard]] ConditionedMoments<typename MeanDerived::Scalar, TargetSize, TargetMaxSize> conditionMoments(
     const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov,
     const IndexVector<TargetSize, TargetMaxSize>& target, const IndexVector<GivenSize, GivenMaxSize>& given,
-    const Eigen::MatrixBase<ValuesDerived>& values) {
+    const Eigen::MatrixBase<ValuesDerived>& values, const GivenSpace& givenSpace, const TargetSpace& targetSpace) {
   using Scalar = typename MeanDerived::Scalar;
   using GivenVector = Eigen::Matrix<Scalar, GivenSize, 1, Eigen::ColMajor, GivenMaxSize, 1>;
   using GivenMatrix = MatrixOf<Scalar, GivenSize, GivenSize, GivenMaxSize, GivenMaxSize>;
   using CrossMatrix = MatrixOf<Scalar, TargetSize, GivenSize, TargetMaxSize, GivenMaxSize>;
   EIGEN_FILTER_ASSERT(values.size() == given.size());
 
-  const GivenVector residual{values - mean.derived()(given)};
+  GivenVector residual{values - mean.derived()(given)};
+  givenSpace.normalizeDifferences(residual);
   const Eigen::LDLT<GivenMatrix> ldlt{GivenMatrix{lowerSymmetricBlock(cov, given, given)}};
   const CrossMatrix cross{lowerSymmetricBlock(cov, target, given)};
   const CrossMatrix gain{ldlt.solve(cross.transpose()).transpose()};
@@ -175,8 +179,21 @@ template <typename MeanDerived, typename CovDerived, typename ValuesDerived, int
   const Scalar log2Pi{Eigen::numext::log(Scalar(2) * Scalar(EIGEN_PI))};
   const Scalar logDeterminant{ldlt.vectorD().array().log().sum()};
   const Scalar wsse{residual.dot(ldlt.solve(residual))};
-  return {mean.derived()(target) + gain * residual, lowerSymmetricBlock(cov, target, target) - gain * cross.transpose(),
-          Scalar(-0.5) * (Scalar(given.size()) * log2Pi + logDeterminant + wsse)};
+  ConditionedMoments<Scalar, TargetSize, TargetMaxSize> result{
+      mean.derived()(target) + gain * residual, lowerSymmetricBlock(cov, target, target) - gain * cross.transpose(),
+      Scalar(-0.5) * (Scalar(given.size()) * log2Pi + logDeterminant + wsse)};
+  targetSpace.normalizeValues(result.mean);
+  return result;
+}
+
+/** conditionMoments() in linear spaces. */
+template <typename MeanDerived, typename CovDerived, typename ValuesDerived, int TargetSize, int TargetMaxSize,
+          int GivenSize, int GivenMaxSize>
+[[nodiscard]] ConditionedMoments<typename MeanDerived::Scalar, TargetSize, TargetMaxSize> conditionMoments(
+    const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov,
+    const IndexVector<TargetSize, TargetMaxSize>& target, const IndexVector<GivenSize, GivenMaxSize>& given,
+    const Eigen::MatrixBase<ValuesDerived>& values) {
+  return conditionMoments(mean, cov, target, given, values, Linear<GivenSize>{}, Linear<TargetSize>{});
 }
 
 }  // namespace EigenFilter::internal

@@ -14,6 +14,15 @@ static_assert(EIGEN_VERSION_AT_LEAST(5, 0, 0), "EigenFilter requires Eigen 5.0 o
 #define EIGEN_FILTER_ASSERT(x) eigen_assert(x)
 #endif
 
+/** Lets an empty member, such as the default Linear space, take no storage. */
+#if defined(__has_cpp_attribute) && __has_cpp_attribute(msvc::no_unique_address)
+#define EIGEN_FILTER_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
+#elif defined(__has_cpp_attribute) && __has_cpp_attribute(no_unique_address)
+#define EIGEN_FILTER_NO_UNIQUE_ADDRESS [[no_unique_address]]
+#else
+#define EIGEN_FILTER_NO_UNIQUE_ADDRESS
+#endif
+
 namespace EigenFilter {
 
 inline constexpr int versionMajor{0};

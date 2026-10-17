@@ -9,6 +9,7 @@
 #include "Indexing.h"
 #include "Macros.h"
 #include "Moments.h"
+#include "Space.h"
 
 namespace EigenFilter {
 
@@ -21,16 +22,22 @@ enum class GaussianError {
   NonFinite,            ///< the covariance's lower triangle contains NaN or infinity
 };
 
-template <typename Scalar_, int Size_, int MaxSize_ = Size_>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_>>
 class Gaussian;
 
-template <typename Scalar_, int Size_, int MaxSize_>
+template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
 class MutableGaussian;
 
-template <typename Source, typename Indices>
+template <typename Source, typename Indices,
+          typename SubSpace = internal::ProjectedSpace<
+              typename Source::SpaceType,
+              internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::size>>
 class GaussianMarginal;
 
 namespace internal {
+
+template <template <typename, typename, typename> typename Marginal, typename... Path, typename Source>
+[[nodiscard]] auto tagMarginal(const Source& source);
 
 /** Shared implementation of MutableGaussian::conditional() and Gaussian::conditional(). */
 template <typename Source, typename TargetIndices, typename GivenIndices, typename Derived>
@@ -41,10 +48,14 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
   const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.size(), targetIndices)};
   const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.size(), givenIndices)};
   EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
-  auto result{conditionMoments(source.mean(), source.cov(), target, given, values)};
   using Target = std::remove_cvref_t<decltype(target)>;
-  return MutableGaussian<typename Source::Scalar, Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>{
-      std::move(result.mean), std::move(result.cov)};
+  using Given = std::remove_cvref_t<decltype(given)>;
+  const auto targetSpace{projectSpace<Target::RowsAtCompileTime>(source.space(), source.size(), target)};
+  const auto givenSpace{projectSpace<Given::RowsAtCompileTime>(source.space(), source.size(), given)};
+  auto result{conditionMoments(source.mean(), source.cov(), target, given, values, givenSpace, targetSpace)};
+  return MutableGaussian<typename Source::Scalar, Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime,
+                         std::remove_cvref_t<decltype(targetSpace)>>{targetSpace, std::move(result.mean),
+                                                                     std::move(result.cov)};
 }
 
 /** conditionalGaussian() with every entry not in \a givenIndices as the target. */
@@ -70,24 +81,33 @@ template <typename Source, typename GivenIndices, typename Derived>
  * marginal is alive this object is borrowed: its values may change, but resizing,
  * moving, or destroying it is a programmer error caught by \c EIGEN_FILTER_ASSERT.
  *
+ * The space describes how each coordinate behaves (see \ref Spaces). The mean is
+ * normalized whenever it is set, and residuals are normalized before they are used, so
+ * a periodic coordinate's mean stays in range and its residuals take the short way
+ * around. Densities use the nearest image only (see \ref Spaces).
+ *
  * Only the lower triangle of the covariance is read by the factorization.
  * Changing the mean does not invalidate the factorization.
  *
  * \tparam Scalar_   scalar type
  * \tparam Size_     dimension, or \c Eigen::Dynamic
  * \tparam MaxSize_  maximum dimension
+ * \tparam Space_    space of the coordinates; Linear by default
  *
- * \sa class Gaussian, class Moments
+ * \sa class Gaussian, class Moments, MutableGaussianIn
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_>>
 class MutableGaussian {
+  static_assert(Size_ == Eigen::Dynamic || isValidSize<Space_>(Size_), "the size does not fit the space");
+
  public:
   using MomentsType = Moments<Scalar_, Size_, MaxSize_>;
   using Scalar = typename MomentsType::Scalar;
   using Index = typename MomentsType::Index;
   using VectorType = typename MomentsType::VectorType;
   using MatrixType = typename MomentsType::MatrixType;
-  using GaussianType = Gaussian<Scalar_, Size_, MaxSize_>;
+  using SpaceType = Space_;
+  using GaussianType = Gaussian<Scalar_, Size_, MaxSize_, Space_>;
   static constexpr int SizeAtCompileTime{Size_};
   static constexpr int MaxSizeAtCompileTime{MaxSize_};
   static constexpr bool IsMutable{true};
@@ -95,17 +115,33 @@ class MutableGaussian {
   MutableGaussian() = default;
 
   /** Constructs a Gaussian of dimension \a n with uninitialized contents. */
-  explicit MutableGaussian(Index n) : m_moments{n} {}
+  explicit MutableGaussian(Index n) : m_moments{n} { adoptDefaultSpace(); }
 
-  explicit MutableGaussian(MomentsType moments) : m_moments{std::move(moments)} {}
+  explicit MutableGaussian(MomentsType moments) : m_moments{std::move(moments)} { adoptDefaultSpace(); }
 
   template <typename MeanDerived, typename CovDerived>
   MutableGaussian(const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
-      : m_moments{mean, cov} {}
+      : m_moments{mean, cov} {
+    adoptDefaultSpace();
+  }
+
+  /** Constructs a Gaussian of dimension \a n in \a space, with uninitialized contents. */
+  MutableGaussian(Space_ space, Index n) : m_moments{n}, m_space{std::move(space)} { checkSpace(); }
+
+  MutableGaussian(Space_ space, MomentsType moments) : m_moments{std::move(moments)}, m_space{std::move(space)} {
+    checkSpace();
+  }
+
+  template <typename MeanDerived, typename CovDerived>
+  MutableGaussian(Space_ space, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
+      : m_moments{mean, cov}, m_space{std::move(space)} {
+    checkSpace();
+  }
 
   /** Copies the data and any valid factorization. The copy starts unlocked. */
   MutableGaussian(const MutableGaussian& other)
       : m_moments{other.m_moments},
+        m_space{other.m_space},
         m_llt{other.m_llt},
         m_logDeterminant{other.m_logDeterminant},
         m_factorValid{other.m_factorValid} {}
@@ -115,6 +151,7 @@ class MutableGaussian {
    */
   MutableGaussian(MutableGaussian&& other) noexcept
       : m_moments{std::move(other.m_moments)},
+        m_space{std::move(other.m_space)},
         m_llt{std::move(other.m_llt)},
         m_logDeterminant{other.m_logDeterminant},
         m_factorValid{other.m_factorValid} {
@@ -127,6 +164,7 @@ class MutableGaussian {
     assertUnlocked();
     assertUnborrowed();
     m_moments = other.m_moments;
+    m_space = other.m_space;
     m_llt = other.m_llt;
     m_logDeterminant = other.m_logDeterminant;
     m_factorValid = other.m_factorValid;
@@ -139,6 +177,7 @@ class MutableGaussian {
     other.assertUnlocked();
     other.assertUnborrowed();
     m_moments = std::move(other.m_moments);
+    m_space = std::move(other.m_space);
     m_llt = std::move(other.m_llt);
     m_logDeterminant = other.m_logDeterminant;
     m_factorValid = other.m_factorValid;
@@ -153,24 +192,30 @@ class MutableGaussian {
 
   [[nodiscard]] Index size() const { return m_moments.size(); }
 
-  /** Resizes mean, covariance, and factorization. Contents are unspecified afterward. */
+  /** Resizes mean, covariance, and factorization. \a n must fit the space. Contents are
+   * unspecified afterward.
+   */
   void resize(Index n) {
     assertUnlocked();
     assertUnborrowed();
     m_moments.resize(n);
+    if constexpr (requires { m_space.resize(n); }) m_space.resize(n);
+    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
     m_factorValid = false;
   }
 
+  [[nodiscard]] const Space_& space() const { return m_space; }
   [[nodiscard]] const MomentsType& moments() const { return m_moments; }
   [[nodiscard]] const VectorType& mean() const { return m_moments.mean(); }
   [[nodiscard]] const MatrixType& cov() const { return m_moments.cov(); }
 
-  /** Sets the mean. Does not invalidate the factorization. */
+  /** Sets the mean, normalized by the space. Does not invalidate the factorization. */
   template <typename Derived>
   void setMean(const Eigen::MatrixBase<Derived>& mean) {
     assertUnlocked();
     EIGEN_FILTER_ASSERT(mean.size() == size());
     m_moments.mean() = mean;
+    m_space.normalizeValues(m_moments.mean());
   }
 
   /** Sets the covariance, invalidating the factorization. */
@@ -193,6 +238,15 @@ class MutableGaussian {
     return GaussianMarginal<MutableGaussian, Indices>{*this, indices};
   }
 
+  /** \returns a read-only view of the subspace named by the tag path \a Path (see
+   * index<>), whose space is that subspace with its parameters.
+   */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  [[nodiscard]] auto marginal() const {
+    return internal::tagMarginal<GaussianMarginal, Path...>(*this);
+  }
+
   /** \returns a copy of the distribution of the entries \a target given that the
    * entries \a given equal \a values. \a target and \a given must be distinct.
    *
@@ -210,6 +264,13 @@ class MutableGaussian {
   template <typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
     return internal::conditionalGaussian(*this, given, values);
+  }
+
+  /** conditional() given the subspace named by the tag path \a GivenPath (see index<>). */
+  template <typename... GivenPath, typename Derived>
+    requires(sizeof...(GivenPath) > 0)
+  [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalGaussian(*this, internal::asIndexSet(index<Space_, GivenPath...>), values);
   }
 
   /** Factorizes the covariance if it has changed since the last factorization.
@@ -261,7 +322,23 @@ class MutableGaussian {
     EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "MutableGaussian is borrowed by a live marginal");
   }
 
+  /** Sizes a default-constructed space to the data and normalizes the mean. */
+  void adoptDefaultSpace() {
+    if constexpr (requires { m_space.resize(size()); }) m_space.resize(size());
+    checkSpace();
+  }
+
+  /** Checks that the data fits the space and normalizes the mean. */
+  void checkSpace() {
+    if constexpr (requires { m_space.size(); }) {
+      EIGEN_FILTER_ASSERT(m_space.size() == size() && "the space has a different number of coordinates");
+    }
+    EIGEN_FILTER_ASSERT(isValidSize<Space_>(size()) && "the size does not fit the space");
+    m_space.normalizeValues(m_moments.mean());
+  }
+
   MomentsType m_moments;
+  EIGEN_FILTER_NO_UNIQUE_ADDRESS Space_ m_space;
   // Factorization cache, filled lazily by the const factorize().
   mutable Eigen::LLT<MatrixType> m_llt;
   mutable Scalar m_logDeterminant{};
@@ -281,10 +358,11 @@ class MutableGaussian {
  *
  * \sa class MutableGaussian
  */
-template <typename Scalar_, int Size_, int MaxSize_>
+template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
 class Gaussian {
  public:
-  using MutableType = MutableGaussian<Scalar_, Size_, MaxSize_>;
+  using MutableType = MutableGaussian<Scalar_, Size_, MaxSize_, Space_>;
+  using SpaceType = Space_;
   using MomentsType = typename MutableType::MomentsType;
   using Scalar = typename MutableType::Scalar;
   using Index = typename MutableType::Index;
@@ -318,6 +396,7 @@ class Gaussian {
   ~Gaussian() { unlock(); }
 
   [[nodiscard]] Index size() const { return source().size(); }
+  [[nodiscard]] const Space_& space() const { return source().space(); }
   [[nodiscard]] const MomentsType& moments() const { return source().moments(); }
   [[nodiscard]] const VectorType& mean() const { return source().mean(); }
   [[nodiscard]] const MatrixType& cov() const { return source().cov(); }
@@ -338,7 +417,7 @@ class Gaussian {
   }
 
   /** \returns the weighted sum of squared errors (squared Mahalanobis distance)
-   * \f$ (x-\mu)^T \Sigma^{-1} (x-\mu) \f$ of \a x
+   * \f$ (x \boxminus \mu)^T \Sigma^{-1} (x \boxminus \mu) \f$ of \a x
    *
    * \sa logPdf()
    */
@@ -347,6 +426,7 @@ class Gaussian {
     static_assert(Derived::IsVectorAtCompileTime, "wsse() expects a vector");
     EIGEN_FILTER_ASSERT(x.size() == size());
     VectorType residual{x - mean()};
+    space().normalizeDifferences(residual);
     llt().matrixL().solveInPlace(residual);
     return residual.squaredNorm();
   }
@@ -381,6 +461,13 @@ class Gaussian {
     return GaussianMarginal<Gaussian, Indices>{*this, indices};
   }
 
+  /** marginal() of the subspace named by the tag path \a Path; see MutableGaussian::marginal(). */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  [[nodiscard]] auto marginal() const {
+    return internal::tagMarginal<GaussianMarginal, Path...>(*this);
+  }
+
   /** \returns a copy of the conditional distribution; see MutableGaussian::conditional(). */
   template <typename TargetIndices, typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
@@ -392,6 +479,13 @@ class Gaussian {
   template <typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
     return internal::conditionalGaussian(*this, given, values);
+  }
+
+  /** conditional() given the subspace named by the tag path \a GivenPath (see index<>). */
+  template <typename... GivenPath, typename Derived>
+    requires(sizeof...(GivenPath) > 0)
+  [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalGaussian(*this, internal::asIndexSet(index<Space_, GivenPath...>), values);
   }
 
  private:
@@ -425,30 +519,45 @@ class Gaussian {
  * cov() reads only the source's lower triangle, so it is correct for indices in any
  * order. The dimension is known at compile time when the index set's size is.
  *
- * \tparam Source   MutableGaussian or Gaussian
- * \tparam Indices  the index type passed to marginal()
+ * \tparam Source    MutableGaussian or Gaussian
+ * \tparam Indices   the index type passed to marginal()
+ * \tparam SubSpace  space of the selected coordinates: the projection of the source's
+ *                   space, or a named subspace for marginal<Path...>()
  */
-template <typename Source, typename Indices>
+template <typename Source, typename Indices, typename SubSpace>
 class GaussianMarginal {
   using Selection = internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>;
 
  public:
   using Scalar = typename Source::Scalar;
   using Index = Eigen::Index;
+  using SpaceType = SubSpace;
   static constexpr int SizeAtCompileTime{Selection::size};
   static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
-  using MutableType = MutableGaussian<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime>;
+  using MutableType = MutableGaussian<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime, SubSpace>;
   using MomentsType = typename MutableType::MomentsType;
   using IndexVectorType = typename Selection::type;
 
+  /** Selects \a indices, projecting the source's space onto them. */
   GaussianMarginal(const Source& source, const Indices& indices)
       : m_holder{source},
         m_indices{
-            internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(source.size(), indices)} {
+            internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(source.size(), indices)},
+        m_space{internal::projectSpace<SizeAtCompileTime>(source.space(), source.size(), m_indices)} {
+    EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
+  }
+
+  /** Selects \a indices, whose coordinates form \a space. */
+  GaussianMarginal(const Source& source, const Indices& indices, SubSpace space)
+      : m_holder{source},
+        m_indices{
+            internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(source.size(), indices)},
+        m_space{std::move(space)} {
     EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
   }
 
   [[nodiscard]] Index size() const { return m_indices.size(); }
+  [[nodiscard]] const SubSpace& space() const { return m_space; }
 
   /** \returns the source entries this marginal selects */
   [[nodiscard]] const IndexVectorType& indices() const { return m_indices; }
@@ -457,14 +566,34 @@ class GaussianMarginal {
   [[nodiscard]] auto cov() const { return internal::lowerSymmetricBlock(source().cov(), m_indices, m_indices); }
   [[nodiscard]] MomentsType moments() const { return MomentsType{mean(), cov()}; }
 
-  /** \returns an independent MutableGaussian holding this marginal */
-  [[nodiscard]] MutableType copy() const { return MutableType{moments()}; }
+  /** \returns an independent MutableGaussian holding this marginal, in its space */
+  [[nodiscard]] MutableType copy() const { return MutableType{m_space, moments()}; }
 
  private:
   [[nodiscard]] const Source& source() const { return m_holder.get(); }
 
   internal::HolderFor<Source> m_holder;
   IndexVectorType m_indices;
+  SubSpace m_space;
 };
+
+namespace internal {
+
+/** Shared implementation of marginal<Path...>(): the marginal over index<> of \a Path,
+ * whose space is the named subspace.
+ */
+template <template <typename, typename, typename> typename Marginal, typename... Path, typename Source>
+[[nodiscard]] auto tagMarginal(const Source& source) {
+  using Space = typename Source::SpaceType;
+  const auto indices{asIndexSet(index<Space, Path...>)};
+  auto space{subspace<Space, Path...>(source.space())};
+  return Marginal<Source, std::remove_cvref_t<decltype(indices)>, decltype(space)>{source, indices, std::move(space)};
+}
+
+}  // namespace internal
+
+/** A MutableGaussian whose size comes from \a Space. */
+template <typename Scalar, typename Space, int MaxSize = spaceSize<Space>>
+using MutableGaussianIn = MutableGaussian<Scalar, spaceSize<Space>, MaxSize, Space>;
 
 }  // namespace EigenFilter

@@ -27,6 +27,8 @@ add_executable(eigen_filter_tests
   mixture_subspace.cpp
   particle_subspace.cpp
   fitting.cpp
+  space.cpp
+  gaussian_space.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter
