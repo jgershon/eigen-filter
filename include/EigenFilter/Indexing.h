@@ -171,6 +171,57 @@ template <int SourceSize, int SourceMaxSize, typename... GivenPath, typename Spa
   }
 }
 
+/** Shared implementation of marginal(indices) for distributions that own their parameters.
+ *
+ * \returns \a make(target, targetSpace): \a indices resolved in a source of \a space's size, and
+ * the projection of \a space onto them
+ */
+template <int SourceSize, int SourceMaxSize, typename Space, typename Indices, typename Make>
+[[nodiscard]] auto marginalOver(const Space& space, const Indices& indices, Make make) {
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(space.size(), indices)};
+  EIGEN_FILTER_ASSERT(distinctIndices(target) && "marginal indices must be distinct");
+  using Target = std::remove_cvref_t<decltype(target)>;
+  return make(target,
+              projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(space, space.size(), target));
+}
+
+/** Shared implementation of marginal<Path...>() for distributions that own their parameters.
+ *
+ * \returns \a make(target, targetSpace): the indices of the subspace named by \a Path, and that
+ * subspace
+ */
+template <int SourceSize, int SourceMaxSize, typename... Path, typename Space, typename Make>
+[[nodiscard]] auto marginalOverPath(const Space& space, Make make) {
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(space.size(), asIndexSet(idxIn<Path...>(space)))};
+  return make(target, subspace<Space, Path...>(space));
+}
+
+/** Shared implementation of conditional(target, given, values) for distributions that own their
+ * parameters.
+ *
+ * \returns \a make(target, given, targetSpace): the indices resolved in a source of \a space's
+ * size, and the projection of \a space onto the target
+ */
+template <int SourceSize, int SourceMaxSize, typename Space, typename TargetIndices, typename GivenIndices,
+          typename Make>
+[[nodiscard]] auto conditionalOver(const Space& space, const TargetIndices& targetIndices,
+                                   const GivenIndices& givenIndices, Make make) {
+  const Eigen::Index n{space.size()};
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(n, targetIndices)};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(n, givenIndices)};
+  EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
+  using Target = std::remove_cvref_t<decltype(target)>;
+  return make(target, given, projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(space, n, target));
+}
+
+/** conditionalOver() with every coordinate not in \a givenIndices as the target. */
+template <int SourceSize, int SourceMaxSize, typename Space, typename GivenIndices, typename Make>
+[[nodiscard]] auto conditionalOver(const Space& space, const GivenIndices& givenIndices, Make make) {
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(space.size(), givenIndices)};
+  return conditionalOver<SourceSize, SourceMaxSize>(
+      space, complementIndices<SourceSize, SourceMaxSize>(space.size(), given), given, make);
+}
+
 /** Inserts \a rows into the rows of \a matrix before row \a at. */
 template <typename Matrix, typename Derived>
 void insertRows(Matrix& matrix, Eigen::Index at, const Eigen::MatrixBase<Derived>& rows) {
@@ -260,6 +311,7 @@ struct ConditionedMoments {
   Eigen::Matrix<Scalar, Size, 1, Eigen::ColMajor, MaxSize, 1> mean;
   MatrixOf<Scalar, Size, Size, MaxSize, MaxSize> cov;
   Scalar logLikelihood;
+  Scalar wsse;  ///< squared Mahalanobis distance of the conditioning values from their mean
 };
 
 /** Conditions the Gaussian with mean \a mean and (lower-triangle) covariance \a cov
@@ -294,7 +346,7 @@ template <typename MeanDerived, typename CovDerived, typename ValuesDerived, int
   const Scalar wsse{residual.dot(ldlt.solve(residual))};
   ConditionedMoments<Scalar, TargetSize, TargetMaxSize> result{
       mean.derived()(target) + gain * residual, lowerSymmetricBlock(cov, target, target) - gain * cross.transpose(),
-      Scalar(-0.5) * (Scalar(given.size()) * log2Pi + logDeterminant + wsse)};
+      Scalar(-0.5) * (Scalar(given.size()) * log2Pi + logDeterminant + wsse), wsse};
   targetSpace.normalizeValues(result.mean);
   return result;
 }

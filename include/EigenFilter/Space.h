@@ -962,6 +962,15 @@ template <typename... Path, typename Space>
   return {offset + element * elementSize, elements * elementSize};
 }
 
+/** \returns the coordinates of \a space, one per entry, in order. */
+template <typename Space>
+[[nodiscard]] std::vector<Coordinate> coordinatesOf(const Space& space) {
+  std::vector<Coordinate> result;
+  result.reserve(std::size_t(space.size()));
+  space.appendCoordinates(result);
+  return result;
+}
+
 /** An index set for marginal() and conditional(): a single index becomes a one-element set. */
 template <typename Indices>
 [[nodiscard]] auto asIndexSet(const Indices& indices) {

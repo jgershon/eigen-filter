@@ -32,6 +32,8 @@ add_executable(eigen_filter_tests
   space_distributions.cpp
   transform.cpp
   resizable.cpp
+  densities.cpp
+  product_density.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter

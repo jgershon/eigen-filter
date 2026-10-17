@@ -5,6 +5,11 @@
 
 namespace EigenFilter {
 
+/** Reasons a distribution's moments() can fail. */
+enum class MomentsError {
+  Infinite,  ///< the distribution has no finite mean or covariance, such as a Student-t with \f$ \nu \le 2 \f$
+};
+
 /** \brief First and second moments (mean and covariance) of a distribution.
  *
  * \tparam Scalar_  scalar type
