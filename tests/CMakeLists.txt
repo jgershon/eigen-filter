@@ -29,6 +29,7 @@ add_executable(eigen_filter_tests
   fitting.cpp
   space.cpp
   gaussian_space.cpp
+  space_distributions.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter
