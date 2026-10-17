@@ -1,8 +1,10 @@
 #include <EigenFilter/GaussianMixture.h>
 #include <EigenFilter/ParticleSet.h>
+#include <EigenFilter/Transform.h>
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <numbers>
 #include <type_traits>
 
@@ -15,6 +17,8 @@ using EigenFilter::Linear;
 using EigenFilter::ParticleSet;
 using EigenFilter::Periodic;
 using EigenFilter::Repeated;
+using EigenFilter::ScalarOf;
+using EigenFilter::withCross;
 
 namespace {
 
@@ -158,6 +162,45 @@ TEST(ResizableSpace, ParticleInsertAndErase) {
   EXPECT_FALSE(set.bandwidth().has_value());  // no longer fits, so cleared
   EXPECT_EQ(set.states().bottomRows<3>(), landmarks);
   EXPECT_TRUE(set.toDensity().has_value());
+}
+
+TEST(ResizableSpace, TransformAndUpdateAResizableState) {
+  // Each landmark's position is observed relative to the pose; there is a reading per landmark.
+  struct Reading : Linear<2> {};
+  struct Readings : Repeated<Reading> {
+    using Repeated::Repeated;
+  };
+  const Map map{makeMap(2)};
+  const Gaussian<double, Map> x{map, iota(9), makeCov(9)};
+  const Eigen::Vector4d z{0.4, 0.4, 0.7, 0.7};
+  const auto innovation{[](const auto& state, const Eigen::Vector4d& readings) {
+    using T = ScalarOf<decltype(state)>;
+    Eigen::Matrix<T, Eigen::Dynamic, 1> result{readings.cast<T>()};
+    for (Eigen::Index k{0}; k < 2; ++k) result.segment(2 * k, 2) -= state.segment(3 + 3 * k, 2) - state.head(2);
+    return result;
+  }};
+  const auto predicted{EigenFilter::linearized(innovation, Readings{Reading{}, 2}, withCross(x), z)};
+  static_assert(std::is_same_v<std::remove_cvref_t<decltype(predicted.cross)>, Eigen::MatrixXd>);
+  EXPECT_EQ(predicted.cross.rows(), 9);
+  EXPECT_EQ(predicted.cross.cols(), 4);
+  EXPECT_EQ(predicted.output.space().count(), 2);
+
+  const auto [posterior, logLikelihood]{EigenFilter::update(x, predicted)};
+  static_assert(std::is_same_v<typename decltype(posterior)::SpaceType, Map>);
+  EXPECT_EQ(posterior.space(), map);
+  EXPECT_TRUE(std::isfinite(logLikelihood));
+  // With no measurement noise, the relative positions now match the readings exactly.
+  for (Eigen::Index k{0}; k < 2; ++k) {
+    EXPECT_LT(
+        (posterior.mean().template segment<2>(3 + 3 * k) - posterior.mean().template head<2>() - z.segment<2>(2 * k))
+            .norm(),
+        1e-9);
+  }
+
+  // With no output space given, a dynamic return is Linear and sized by f.
+  const auto unnamed{EigenFilter::linearized(innovation, x, z)};
+  static_assert(std::is_same_v<decltype(unnamed)::SpaceType, Linear<Eigen::Dynamic>>);
+  EXPECT_EQ(unnamed.space().size(), 4);
 }
 
 #if GTEST_HAS_DEATH_TEST && !defined(NDEBUG) && !defined(EIGEN_NO_DEBUG)
