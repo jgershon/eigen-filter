@@ -37,13 +37,14 @@ namespace EigenFilter {
  *
  * A space knows its own size(). A fixed-size space is an empty type whose size is a
  * compile-time constant. A resizable space (a Repeated block, a coordinate type with
- * \c Eigen::Dynamic size, or a Composite ending in one) stores its size. Only the last
- * block of a Composite may be resizable. Distributions keep their space's size in step
- * with their data, and grow or shrink their resizable block in place with insert() and
- * erase().
+ * \c Eigen::Dynamic size, or a Composite containing one) stores its size, so a Composite
+ * may hold any number of resizable blocks: offsets after the first one are computed at
+ * runtime. Distributions keep their space's size in step with their data, and grow or
+ * shrink a resizable block in place with insert() and erase().
  *
  * idxIn<Path...>(space) turns a tag path into an Eigen index set from the space's sizes.
- * idx<> gives the same index as a compile-time constant.
+ * idx<> gives the same index as a compile-time constant when every offset on the path is
+ * known at compile time.
  *
  * Every space exposes \c FixedSize (the size of its fixed part), \c Stride (nonzero if it
  * is resizable: the size of one element of its resizable part), \c MaxSize (the largest
@@ -279,10 +280,12 @@ class Bounded : public internal::LeafExtent<Size_, MaxSize_> {
 };
 
 /** \ingroup Spaces
- * \brief The concatenation of \a Blocks. Only the last block may be resizable.
+ * \brief The concatenation of \a Blocks, any of which may be resizable.
  *
  * Nesting a named composite names a range of coordinates; storage is always the flat
- * concatenation. Each block's offset is the total size of the blocks before it.
+ * concatenation. Each block's offset is the total size of the blocks before it, so offsets
+ * after the first resizable block depend on runtime sizes. resize() is only available with
+ * a single resizable block; otherwise grow and shrink each block with insert() and erase().
  */
 template <typename... Blocks>
 class Composite {
@@ -303,12 +306,10 @@ class Composite {
     }
     return BlockCount;
   }
-  static_assert(ResizableCount == 0 || firstResizable() == BlockCount - 1,
-                "only the last block of a composite may be resizable");
 
  public:
   static constexpr int FixedSize{(Blocks::FixedSize + ...)};
-  /** Zero if fixed; otherwise the stride of its resizable block. */
+  /** Zero if fixed; otherwise the greatest common divisor of its resizable blocks' strides. */
   static constexpr int Stride{strides()};
   static constexpr int MaxSize{((Blocks::MaxSize == Eigen::Dynamic) || ...) ? Eigen::Dynamic : (Blocks::MaxSize + ...)};
   static constexpr bool IsLinear{(Blocks::IsLinear && ...)};

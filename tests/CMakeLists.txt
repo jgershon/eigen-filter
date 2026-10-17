@@ -32,6 +32,7 @@ add_executable(eigen_filter_tests
   space_distributions.cpp
   transform.cpp
   resizable.cpp
+  multiple_resizable.cpp
 )
 target_link_libraries(eigen_filter_tests PRIVATE
   EigenFilter::EigenFilter
