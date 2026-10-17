@@ -52,22 +52,16 @@ class GaussianMixtureMarginal;
 
 namespace internal {
 
-/** Shared implementation of GaussianMixture::conditional() and GaussianMixtureDensity::conditional(). */
-template <typename Source, typename TargetIndices, typename GivenIndices, typename Derived>
-[[nodiscard]] auto conditionalMixture(const Source& source, const TargetIndices& targetIndices,
-                                      const GivenIndices& givenIndices, const Eigen::MatrixBase<Derived>& values) {
-  constexpr int SourceSize{Source::SizeAtCompileTime};
-  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
-  const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), targetIndices)};
-  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), givenIndices)};
+/** Shared implementation of GaussianMixture::conditional() and GaussianMixtureDensity::conditional(),
+ * with resolved indices and the target's space.
+ */
+template <typename Source, typename Target, typename Given, typename Derived, typename TargetSpace>
+[[nodiscard]] auto conditionalMixtureIn(const Source& source, const Target& target, const Given& given,
+                                        const Eigen::MatrixBase<Derived>& values, const TargetSpace& targetSpace) {
   EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
-  using Target = std::remove_cvref_t<decltype(target)>;
-  using Given = std::remove_cvref_t<decltype(given)>;
-  auto targetSpace{projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(
-      source.space(), source.componentSize(), target)};
   const auto givenSpace{projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(
       source.space(), source.componentSize(), given)};
-  GaussianMixture<typename Source::Scalar, decltype(targetSpace)> result{targetSpace, target.size()};
+  GaussianMixture<typename Source::Scalar, TargetSpace> result{targetSpace, target.size()};
   result.reserve(source.size());
   for (const auto& component : source) {
     auto conditioned{conditionMoments(component.gaussian.mean(), component.gaussian.cov(), target, given, values,
@@ -76,6 +70,29 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
                std::move(conditioned.cov));
   }
   return result;
+}
+
+/** conditionalMixtureIn() for any index sets, with the target in the projection of the source's space. */
+template <typename Source, typename TargetIndices, typename GivenIndices, typename Derived>
+[[nodiscard]] auto conditionalMixture(const Source& source, const TargetIndices& targetIndices,
+                                      const GivenIndices& givenIndices, const Eigen::MatrixBase<Derived>& values) {
+  constexpr int SourceSize{Source::SizeAtCompileTime};
+  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), targetIndices)};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.componentSize(), givenIndices)};
+  using Target = std::remove_cvref_t<decltype(target)>;
+  return conditionalMixtureIn(source, target, given, values,
+                              projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(
+                                  source.space(), source.componentSize(), target));
+}
+
+/** Shared implementation of conditional<GivenPath...>(); see tagConditional(). */
+template <typename... GivenPath, typename Source, typename Derived>
+[[nodiscard]] auto tagConditionalMixture(const Source& source, const Eigen::MatrixBase<Derived>& values) {
+  return tagConditional<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime, GivenPath...>(
+      source.space(), source.componentSize(), [&](const auto& target, const auto& given, const auto& targetSpace) {
+        return conditionalMixtureIn(source, target, given, values, targetSpace);
+      });
 }
 
 /** conditionalMixture() with every entry not in \a givenIndices as the target. */
@@ -189,27 +206,25 @@ class GaussianMixture {
   GaussianMixture() = default;
 
   /** Constructs an empty mixture whose components will have dimension \a componentSize. */
-  explicit GaussianMixture(Index componentSize) : m_componentSize{componentSize} {
-    if constexpr (requires { m_space.resize(componentSize); }) m_space.resize(componentSize);
-    assertValidComponentSize(componentSize);
-  }
+  explicit GaussianMixture(Index componentSize) { fitSpace(componentSize); }
 
-  /** Constructs an empty mixture in \a space whose components will have dimension \a componentSize. */
-  GaussianMixture(Space_ space, Index componentSize) : m_componentSize{componentSize}, m_space{std::move(space)} {
-    assertValidComponentSize(componentSize);
-  }
+  /** Constructs an empty mixture in \a space. */
+  explicit GaussianMixture(Space_ space) : m_space{std::move(space)} {}
+
+  /** Constructs an empty mixture in \a space whose components will have dimension
+   * \a componentSize. A space with one resizable block is resized to \a componentSize; any
+   * other must already have that size.
+   */
+  GaussianMixture(Space_ space, Index componentSize) : m_space{std::move(space)} { fitSpace(componentSize); }
 
   /** Copies the components and their factorizations. The copy starts unlocked. */
-  GaussianMixture(const GaussianMixture& other)
-      : m_components{other.m_components}, m_componentSize{other.m_componentSize}, m_space{other.m_space} {}
+  GaussianMixture(const GaussianMixture& other) : m_components{other.m_components}, m_space{other.m_space} {}
 
   /** Moving a locked object is a programmer error; if \c EIGEN_FILTER_ASSERT throws,
    * the exception reaches this \c noexcept boundary and calls \c std::terminate.
    */
   GaussianMixture(GaussianMixture&& other) noexcept
-      : m_components{std::move(other.m_components)},
-        m_componentSize{other.m_componentSize},
-        m_space{std::move(other.m_space)} {
+      : m_components{std::move(other.m_components)}, m_space{std::move(other.m_space)} {
     other.assertUnlocked();
     other.assertUnborrowed();
   }
@@ -218,7 +233,6 @@ class GaussianMixture {
     assertUnlocked();
     assertUnborrowed();
     m_components = other.m_components;
-    m_componentSize = other.m_componentSize;
     m_space = other.m_space;
     return *this;
   }
@@ -229,7 +243,6 @@ class GaussianMixture {
     other.assertUnlocked();
     other.assertUnborrowed();
     m_components = std::move(other.m_components);
-    m_componentSize = other.m_componentSize;
     m_space = std::move(other.m_space);
     return *this;
   }
@@ -244,20 +257,54 @@ class GaussianMixture {
   [[nodiscard]] bool empty() const { return m_components.empty(); }
 
   /** \returns the dimension of every component */
-  [[nodiscard]] Index componentSize() const { return m_componentSize; }
+  [[nodiscard]] Index componentSize() const { return m_space.size(); }
 
   [[nodiscard]] const Space_& space() const { return m_space; }
 
-  /** Resizes every component to dimension \a n, which must fit the space. Component
-   * contents are unspecified afterward.
+  /** Resizes every component, and a space with one resizable block, to dimension \a n.
+   * Component contents are unspecified afterward. To grow or shrink one of several
+   * resizable blocks, use insert() and erase().
    */
   void resizeComponents(Index n) {
     assertUnlocked();
     assertUnborrowed();
     if constexpr (requires { m_space.resize(n); }) m_space.resize(n);
-    assertValidComponentSize(n);
-    m_componentSize = n;
+    EIGEN_FILTER_ASSERT(m_space.size() == n && "the size does not fit the space");
     for (auto& component : m_components) component.gaussian.resize(n);
+  }
+
+  /** Inserts the entries \a mean into the resizable block named by the tag path \a Path of
+   * every component, before its element \a element, with covariance \a cov and
+   * cross-covariance \a cross with each component's existing entries. See Gaussian::insert().
+   */
+  template <typename... Path, typename MeanDerived, typename CovDerived, typename CrossDerived>
+    requires(sizeof...(Path) > 0)
+  void insert(Index element, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov,
+              const Eigen::MatrixBase<CrossDerived>& cross) {
+    assertUnlocked();
+    assertUnborrowed();
+    static_cast<void>(internal::growBlock<Path...>(m_space, element, mean.size()));
+    for (auto& component : m_components) component.gaussian.template insert<Path...>(element, mean, cov, cross);
+  }
+
+  /** insert() of entries independent of the existing ones. */
+  template <typename... Path, typename MeanDerived, typename CovDerived>
+    requires(sizeof...(Path) > 0)
+  void insert(Index element, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov) {
+    insert<Path...>(element, mean, cov,
+                    Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>::Zero(mean.size(), componentSize()));
+  }
+
+  /** Removes \a count elements of the resizable block named by the tag path \a Path from
+   * every component, starting at its element \a element. See Gaussian::erase().
+   */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  void erase(Index element, Index count = 1) {
+    assertUnlocked();
+    assertUnborrowed();
+    static_cast<void>(internal::shrinkBlock<Path...>(m_space, element, count));
+    for (auto& component : m_components) component.gaussian.template erase<Path...>(element, count);
   }
 
   void reserve(Index n) {
@@ -278,7 +325,7 @@ class GaussianMixture {
   const_iterator add(Scalar logWeight, MomentsType moments) {
     assertUnlocked();
     assertUnborrowed();
-    EIGEN_FILTER_ASSERT(moments.size() == m_componentSize);
+    EIGEN_FILTER_ASSERT(moments.size() == componentSize());
     m_components.push_back(Component{logWeight, ComponentGaussianType{m_space, std::move(moments)}});
     return std::prev(m_components.cend());
   }
@@ -359,7 +406,7 @@ class GaussianMixture {
   void append(const GaussianMixture& other) {
     assertUnlocked();
     assertUnborrowed();
-    EIGEN_FILTER_ASSERT(other.m_componentSize == m_componentSize);
+    EIGEN_FILTER_ASSERT(other.componentSize() == componentSize());
     EIGEN_FILTER_ASSERT(other.m_space == m_space && "cannot append a mixture in a different space");
     const std::size_t n{other.m_components.size()};
     m_components.reserve(m_components.size() + n);
@@ -554,11 +601,13 @@ class GaussianMixture {
     return internal::conditionalMixture(*this, given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>); see
+   * Gaussian::conditional<GivenPath...>() for the result's space.
+   */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalMixture(*this, internal::asIndexSet(idx<Space_, GivenPath...>), values);
+    return internal::tagConditionalMixture<GivenPath...>(*this, values);
   }
 
   /** Validates the weights and factorizes every component whose covariance has changed.
@@ -610,10 +659,12 @@ class GaussianMixture {
     const GaussianMixture& m_mixture;
   };
 
-  static void assertValidComponentSize(Index n) {
-    EIGEN_FILTER_ASSERT(n >= 0 && (SizeAtCompileTime == Eigen::Dynamic || n == SizeAtCompileTime) &&
-                        (MaxSizeAtCompileTime == Eigen::Dynamic || n <= MaxSizeAtCompileTime));
-    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
+  /** Resizes a space with one resizable block to \a n, and checks that the sizes match. */
+  void fitSpace(Index n) {
+    if constexpr (requires { m_space.resize(n); }) {
+      if (m_space.size() != n) m_space.resize(n);
+    }
+    EIGEN_FILTER_ASSERT(m_space.size() == n && "the size does not fit the space");
   }
 
   static void assignMoments(Component& component, const MomentsType& moments) {
@@ -684,7 +735,6 @@ class GaussianMixture {
   }
 
   std::vector<Component> m_components;
-  Index m_componentSize{SizeAtCompileTime == Eigen::Dynamic ? 0 : SizeAtCompileTime};
   EIGEN_FILTER_NO_UNIQUE_ADDRESS Space_ m_space;
   // Filled by the const factorize() for use by views.
   mutable Scalar m_logTotalWeight{};
@@ -844,11 +894,13 @@ class GaussianMixtureDensity {
     return internal::conditionalMixture(*this, given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>); see
+   * Gaussian::conditional<GivenPath...>() for the result's space.
+   */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalMixture(*this, internal::asIndexSet(idx<Space_, GivenPath...>), values);
+    return internal::tagConditionalMixture<GivenPath...>(*this, values);
   }
 
  private:

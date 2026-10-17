@@ -143,7 +143,9 @@ TEST(Space, CompositeNormalizesEachBlockAndEverySample) {
 }
 
 TEST(Space, RepeatedNormalizesEveryRepetition) {
-  const World world;
+  World world;
+  world.resize(12);  // two vehicles
+  EXPECT_EQ(world.block<1>().count(), 2);
   Eigen::VectorXd x{Eigen::VectorXd::Zero(12)};
   x(7) = 4.0;    // vehicle 0 longitude
   x(10) = -4.0;  // vehicle 1 longitude

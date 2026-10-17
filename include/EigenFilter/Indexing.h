@@ -148,6 +148,94 @@ template <int SourceSize, int SourceMaxSize, int GivenSize, int GivenMaxSize>
   }
 }
 
+/** Shared implementation of conditional<GivenPath...>(): conditions a source of dimension \a n
+ * in \a space on the subspace named by \a GivenPath, with every other coordinate as the target.
+ *
+ * When \a GivenPath names one top-level block of a Composite, the target keeps the remaining
+ * blocks as its space, so a joint conditioned on one block returns the other in its own space.
+ * Otherwise the target's space is the projection of \a space onto it.
+ *
+ * \returns \a condition(target, given, targetSpace), with the indices resolved
+ */
+template <int SourceSize, int SourceMaxSize, typename... GivenPath, typename Space, typename Condition>
+[[nodiscard]] auto tagConditional(const Space& space, Eigen::Index n, Condition condition) {
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(n, asIndexSet(idxIn<GivenPath...>(space)))};
+  const auto target{
+      resolveIndices<SourceSize, SourceMaxSize>(n, complementIndices<SourceSize, SourceMaxSize>(n, given))};
+  if constexpr (isTopLevelBlock<Space, GivenPath...>) {
+    return condition(target, given, complementSubspace<GivenPath...>(space));
+  } else {
+    using Target = std::remove_cvref_t<decltype(target)>;
+    return condition(target, given,
+                     projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(space, n, target));
+  }
+}
+
+/** Inserts \a rows into the rows of \a matrix before row \a at. */
+template <typename Matrix, typename Derived>
+void insertRows(Matrix& matrix, Eigen::Index at, const Eigen::MatrixBase<Derived>& rows) {
+  const Eigen::Index n{matrix.rows()};
+  const Eigen::Index k{rows.rows()};
+  EIGEN_FILTER_ASSERT(at >= 0 && at <= n && rows.cols() == matrix.cols());
+  Matrix result;
+  result.resize(n + k, matrix.cols());
+  result.topRows(at) = matrix.topRows(at);
+  result.middleRows(at, k) = rows;
+  result.bottomRows(n - at) = matrix.bottomRows(n - at);
+  matrix = std::move(result);
+}
+
+/** Removes \a count rows of \a matrix starting at row \a at. */
+template <typename Matrix>
+void eraseRows(Matrix& matrix, Eigen::Index at, Eigen::Index count) {
+  const Eigen::Index n{matrix.rows()};
+  EIGEN_FILTER_ASSERT(at >= 0 && count >= 0 && at + count <= n);
+  Matrix result;
+  result.resize(n - count, matrix.cols());
+  result.topRows(at) = matrix.topRows(at);
+  result.bottomRows(n - at - count) = matrix.bottomRows(n - at - count);
+  matrix = std::move(result);
+}
+
+/** Inserts rows and columns into the symmetric \a matrix before index \a at: the block
+ * \a block on the diagonal, and \a cross (new rows by existing columns) off it.
+ */
+template <typename Matrix, typename BlockDerived, typename CrossDerived>
+void insertSymmetric(Matrix& matrix, Eigen::Index at, const Eigen::MatrixBase<BlockDerived>& block,
+                     const Eigen::MatrixBase<CrossDerived>& cross) {
+  const Eigen::Index n{matrix.rows()};
+  const Eigen::Index k{block.rows()};
+  const Eigen::Index after{n - at};
+  EIGEN_FILTER_ASSERT(at >= 0 && at <= n && block.cols() == k && cross.rows() == k && cross.cols() == n);
+  Matrix result;
+  result.resize(n + k, n + k);
+  result.topLeftCorner(at, at) = matrix.topLeftCorner(at, at);
+  result.topRightCorner(at, after) = matrix.topRightCorner(at, after);
+  result.bottomLeftCorner(after, at) = matrix.bottomLeftCorner(after, at);
+  result.bottomRightCorner(after, after) = matrix.bottomRightCorner(after, after);
+  result.block(at, at, k, k) = block;
+  result.block(at, 0, k, at) = cross.leftCols(at);
+  result.block(at, at + k, k, after) = cross.rightCols(after);
+  result.block(0, at, at, k) = cross.leftCols(at).transpose();
+  result.block(at + k, at, after, k) = cross.rightCols(after).transpose();
+  matrix = std::move(result);
+}
+
+/** Removes \a count rows and columns of \a matrix starting at index \a at. */
+template <typename Matrix>
+void eraseSymmetric(Matrix& matrix, Eigen::Index at, Eigen::Index count) {
+  const Eigen::Index n{matrix.rows()};
+  const Eigen::Index after{n - at - count};
+  EIGEN_FILTER_ASSERT(at >= 0 && count >= 0 && after >= 0);
+  Matrix result;
+  result.resize(n - count, n - count);
+  result.topLeftCorner(at, at) = matrix.topLeftCorner(at, at);
+  result.topRightCorner(at, after) = matrix.topRightCorner(at, after);
+  result.bottomLeftCorner(after, at) = matrix.bottomLeftCorner(after, at);
+  result.bottomRightCorner(after, after) = matrix.bottomRightCorner(after, after);
+  matrix = std::move(result);
+}
+
 /** \returns a lazy expression for the block of the symmetric matrix whose lower
  * triangle is \a matrix, at rows \a rows and columns \a cols. Only lower-triangle
  * entries of \a matrix are read, whatever order the indices are in. The expression
