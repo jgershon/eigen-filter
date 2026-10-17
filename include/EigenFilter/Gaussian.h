@@ -22,7 +22,7 @@ enum class GaussianError {
   NonFinite,            ///< the covariance's lower triangle contains NaN or infinity
 };
 
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_>>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
 class Gaussian;
 
 template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
@@ -31,7 +31,8 @@ class MutableGaussian;
 template <typename Source, typename Indices,
           typename SubSpace = internal::ProjectedSpace<
               typename Source::SpaceType,
-              internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::size>>
+              internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::size,
+              internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::maxSize>>
 class GaussianMarginal;
 
 namespace internal {
@@ -50,8 +51,10 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
   EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
   using Target = std::remove_cvref_t<decltype(target)>;
   using Given = std::remove_cvref_t<decltype(given)>;
-  const auto targetSpace{projectSpace<Target::RowsAtCompileTime>(source.space(), source.size(), target)};
-  const auto givenSpace{projectSpace<Given::RowsAtCompileTime>(source.space(), source.size(), given)};
+  const auto targetSpace{
+      projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(source.space(), source.size(), target)};
+  const auto givenSpace{
+      projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(source.space(), source.size(), given)};
   auto result{conditionMoments(source.mean(), source.cov(), target, given, values, givenSpace, targetSpace)};
   return MutableGaussian<typename Source::Scalar, Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime,
                          std::remove_cvref_t<decltype(targetSpace)>>{targetSpace, std::move(result.mean),
@@ -96,7 +99,7 @@ template <typename Source, typename GivenIndices, typename Derived>
  *
  * \sa class Gaussian, class Moments, MutableGaussianIn
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_>>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
 class MutableGaussian {
   static_assert(Size_ == Eigen::Dynamic || isValidSize<Space_>(Size_), "the size does not fit the space");
 
@@ -239,7 +242,7 @@ class MutableGaussian {
   }
 
   /** \returns a read-only view of the subspace named by the tag path \a Path (see
-   * index<>), whose space is that subspace with its parameters.
+   * idx<>), whose space is that subspace with its parameters.
    */
   template <typename... Path>
     requires(sizeof...(Path) > 0)
@@ -266,11 +269,11 @@ class MutableGaussian {
     return internal::conditionalGaussian(*this, given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see index<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalGaussian(*this, internal::asIndexSet(index<Space_, GivenPath...>), values);
+    return internal::conditionalGaussian(*this, internal::asIndexSet(idx<Space_, GivenPath...>), values);
   }
 
   /** Factorizes the covariance if it has changed since the last factorization.
@@ -481,11 +484,11 @@ class Gaussian {
     return internal::conditionalGaussian(*this, given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see index<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalGaussian(*this, internal::asIndexSet(index<Space_, GivenPath...>), values);
+    return internal::conditionalGaussian(*this, internal::asIndexSet(idx<Space_, GivenPath...>), values);
   }
 
  private:
@@ -543,7 +546,8 @@ class GaussianMarginal {
       : m_holder{source},
         m_indices{
             internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(source.size(), indices)},
-        m_space{internal::projectSpace<SizeAtCompileTime>(source.space(), source.size(), m_indices)} {
+        m_space{
+            internal::projectSpace<SizeAtCompileTime, MaxSizeAtCompileTime>(source.space(), source.size(), m_indices)} {
     EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
   }
 
@@ -579,21 +583,21 @@ class GaussianMarginal {
 
 namespace internal {
 
-/** Shared implementation of marginal<Path...>(): the marginal over index<> of \a Path,
+/** Shared implementation of marginal<Path...>(): the marginal over idx<> of \a Path,
  * whose space is the named subspace.
  */
 template <template <typename, typename, typename> typename Marginal, typename... Path, typename Source>
 [[nodiscard]] auto tagMarginal(const Source& source) {
   using Space = typename Source::SpaceType;
-  const auto indices{asIndexSet(index<Space, Path...>)};
+  const auto indices{asIndexSet(idx<Space, Path...>)};
   auto space{subspace<Space, Path...>(source.space())};
   return Marginal<Source, std::remove_cvref_t<decltype(indices)>, decltype(space)>{source, indices, std::move(space)};
 }
 
 }  // namespace internal
 
-/** A MutableGaussian whose size comes from \a Space. */
-template <typename Scalar, typename Space, int MaxSize = spaceSize<Space>>
+/** A MutableGaussian whose size and storage bound come from \a Space. */
+template <typename Scalar, typename Space, int MaxSize = spaceMaxSize<Space>>
 using MutableGaussianIn = MutableGaussian<Scalar, spaceSize<Space>, MaxSize, Space>;
 
 }  // namespace EigenFilter
