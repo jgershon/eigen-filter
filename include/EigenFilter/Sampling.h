@@ -40,6 +40,19 @@ template <typename Matrix, std::uniform_random_bit_generator G>
   return z;
 }
 
+/** \returns a \a rows by \a cols matrix of independent draws uniform on <tt>[0, 1)</tt>,
+ * filled in storage order so results depend only on \a rng.
+ */
+template <typename Matrix, std::uniform_random_bit_generator G>
+[[nodiscard]] Matrix standardUniform(Eigen::Index rows, Eigen::Index cols, G& rng) {
+  using Scalar = typename Matrix::Scalar;
+  static_assert(std::floating_point<Scalar>, "sampling requires a standard floating-point scalar");
+  Matrix u{rows, cols};
+  std::uniform_real_distribution<Scalar> uniform;
+  std::generate(u.data(), u.data() + u.size(), [&] { return uniform(rng); });
+  return u;
+}
+
 }  // namespace internal
 
 /** \returns \a n independent draws from \a gaussian, one per column.
