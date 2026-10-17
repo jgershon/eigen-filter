@@ -12,7 +12,7 @@
 using EigenFilter::Bounded;
 using EigenFilter::Composite;
 using EigenFilter::CoordinateKind;
-using EigenFilter::index;
+using EigenFilter::idx;
 using EigenFilter::Linear;
 using EigenFilter::MutableGaussian;
 using EigenFilter::MutableGaussianIn;
@@ -148,6 +148,17 @@ TEST(GaussianSpace, ResizableSpace) {
   EXPECT_EQ(g.mean()(8), 4.0);
 }
 
+TEST(GaussianSpace, CappedSpaceGivesFixedCapacityStorage) {
+  struct Vehicle : Composite<Linear<2>, Periodic<>> {};
+  using Fleet = Composite<Linear<1>, Repeated<Vehicle, 3>>;
+  using G = MutableGaussianIn<double, Fleet>;
+  static_assert(G::SizeAtCompileTime == Eigen::Dynamic && G::MaxSizeAtCompileTime == 10);
+  static_assert(G::VectorType::MaxRowsAtCompileTime == 10);
+  G g{Fleet{}, Eigen::Index{10}};
+  EXPECT_EQ(g.size(), 10);
+  static_assert(std::is_same_v<MutableGaussian<double, Eigen::Dynamic, 6>::SpaceType, Linear<Eigen::Dynamic, 6>>);
+}
+
 #if GTEST_HAS_DEATH_TEST && !defined(NDEBUG) && !defined(EIGEN_NO_DEBUG)
 
 TEST(GaussianSpaceDeathTest, SizeMustFitTheSpace) {
@@ -156,6 +167,10 @@ TEST(GaussianSpaceDeathTest, SizeMustFitTheSpace) {
   MutableGaussianIn<double, World> g{World{}, Eigen::Index{4}};
   EXPECT_DEATH(g.resize(5), "fit the space");
   EXPECT_DEATH((MutableGaussianIn<double, World>{World{}, Eigen::Index{3}}), "fit the space");
+
+  using Capped = Composite<Linear<1>, Repeated<Vehicle, 2>>;
+  MutableGaussian<double, Eigen::Dynamic, Eigen::Dynamic, Capped> unbounded{Capped{}, Eigen::Index{7}};
+  EXPECT_DEATH(unbounded.resize(10), "fit the space");
 }
 
 #endif

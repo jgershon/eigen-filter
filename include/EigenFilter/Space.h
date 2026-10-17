@@ -32,10 +32,14 @@ namespace EigenFilter {
  * a runtime number of times. Only the last block of a Composite may be resizable, so
  * every coordinate's offset is known at compile time. Named subspaces are tag types
  * derived from a space (<tt>struct Heading : Periodic<> { using Periodic::Periodic; };</tt>),
- * and index<> and indexOf<>() turn them into Eigen index sets.
+ * and idx<> and idxOf<>() turn them into Eigen index sets.
  *
  * Every space exposes \c FixedSize (the size of its fixed part), \c Stride (the size of
- * the block its resizable tail repeats, or 0 if it is fully fixed), and \c IsLinear.
+ * the block its resizable tail repeats, or 0 if it is fully fixed), \c MaxSize (the
+ * largest valid size, or \c Eigen::Dynamic if unbounded), and \c IsLinear. Like Eigen's
+ * matrices, the coordinate types take a size and a maximum size, and Repeated takes a
+ * maximum number of repetitions; MutableGaussianIn and friends use the space's
+ * \c MaxSize as their storage bound, so a capped space gets fixed-capacity storage.
  */
 
 /** How one coordinate of a CoordinateSpace behaves. */
@@ -102,15 +106,18 @@ void applyToCoefficients(const Eigen::MatrixBase<Derived>& block, F f) {
 }  // namespace internal
 
 /** \ingroup Spaces
- * \brief \a Size_ plain coordinates, or a resizable run of them if \a Size_ is \c Eigen::Dynamic.
+ * \brief \a Size_ plain coordinates, or a resizable run of at most \a MaxSize_ of them if
+ * \a Size_ is \c Eigen::Dynamic.
  *
  * The default space everywhere: an empty type whose operations do nothing.
  */
-template <int Size_ = 1>
+template <int Size_ = 1, int MaxSize_ = Size_>
 struct Linear {
   static_assert(Size_ == Eigen::Dynamic || Size_ >= 0);
+  static_assert(Size_ == Eigen::Dynamic || MaxSize_ == Size_, "a fixed size is its own maximum");
   static constexpr int FixedSize{Size_ == Eigen::Dynamic ? 0 : Size_};
   static constexpr int Stride{Size_ == Eigen::Dynamic ? 1 : 0};
+  static constexpr int MaxSize{MaxSize_};
   static constexpr bool IsLinear{true};
 
   template <typename Derived>
@@ -131,12 +138,14 @@ struct Linear {
  * Values are kept in <tt>[lowest, lowest + period)</tt> and differences in
  * <tt>[-period/2, period/2)</tt>. The default is an angle in <tt>[-π, π)</tt>.
  */
-template <int Size_ = 1>
+template <int Size_ = 1, int MaxSize_ = Size_>
 class Periodic {
  public:
   static_assert(Size_ == Eigen::Dynamic || Size_ >= 1);
+  static_assert(Size_ == Eigen::Dynamic || MaxSize_ == Size_, "a fixed size is its own maximum");
   static constexpr int FixedSize{Size_ == Eigen::Dynamic ? 0 : Size_};
   static constexpr int Stride{Size_ == Eigen::Dynamic ? 1 : 0};
+  static constexpr int MaxSize{MaxSize_};
   static constexpr bool IsLinear{false};
 
   /** An angle: period 2π, values in <tt>[-π, π)</tt>. */
@@ -181,12 +190,14 @@ class Periodic {
  * \f$ x \f$ becomes \f$ 2a - x \f$. For a range this is usually the physical answer, since
  * a range is a norm. Differences are plain. The default is <tt>[0, ∞)</tt>.
  */
-template <int Size_ = 1>
+template <int Size_ = 1, int MaxSize_ = Size_>
 class Bounded {
  public:
   static_assert(Size_ == Eigen::Dynamic || Size_ >= 1);
+  static_assert(Size_ == Eigen::Dynamic || MaxSize_ == Size_, "a fixed size is its own maximum");
   static constexpr int FixedSize{Size_ == Eigen::Dynamic ? 0 : Size_};
   static constexpr int Stride{Size_ == Eigen::Dynamic ? 1 : 0};
+  static constexpr int MaxSize{MaxSize_};
   static constexpr bool IsLinear{false};
 
   /** Nonnegative values: <tt>[0, ∞)</tt>. */
@@ -232,6 +243,7 @@ class Composite {
   static constexpr std::size_t BlockCount{sizeof...(Blocks)};
   static constexpr std::array<int, BlockCount> Sizes{Blocks::FixedSize...};
   static constexpr std::array<int, BlockCount> Strides{Blocks::Stride...};
+  static constexpr std::array<int, BlockCount> MaxSizes{Blocks::MaxSize...};
 
   static constexpr bool onlyLastIsResizable() {
     for (std::size_t i{0}; i + 1 < BlockCount; ++i) {
@@ -250,6 +262,9 @@ class Composite {
  public:
   static constexpr int FixedSize{(Blocks::FixedSize + ...)};
   static constexpr int Stride{Strides[BlockCount - 1]};
+  static constexpr int MaxSize{MaxSizes[BlockCount - 1] == Eigen::Dynamic
+                                   ? Eigen::Dynamic
+                                   : FixedSize - Sizes[BlockCount - 1] + MaxSizes[BlockCount - 1]};
   static constexpr bool IsLinear{(Blocks::IsLinear && ...)};
   /** Offset of each block's first coordinate. */
   static constexpr std::array<int, BlockCount> Offsets{offsets()};
@@ -304,19 +319,22 @@ class Composite {
 };
 
 /** \ingroup Spaces
- * \brief A fixed-size \a Block repeated any number of times, such as one block per vehicle.
+ * \brief A fixed-size \a Block repeated any number of times, up to \a MaxCount, such as one
+ * block per vehicle.
  *
  * Its size is always a multiple of the block's size. Every repetition shares the
  * block's parameters (periods and bounds).
  */
-template <typename Block>
+template <typename Block, int MaxCount = Eigen::Dynamic>
 class Repeated {
   static_assert(Block::Stride == 0 && Block::FixedSize > 0, "a repeated block must have a fixed, nonzero size");
+  static_assert(MaxCount == Eigen::Dynamic || MaxCount >= 0);
 
  public:
   using BlockType = Block;
   static constexpr int FixedSize{0};
   static constexpr int Stride{Block::FixedSize};
+  static constexpr int MaxSize{MaxCount == Eigen::Dynamic ? Eigen::Dynamic : MaxCount * Block::FixedSize};
   static constexpr bool IsLinear{Block::IsLinear};
 
   Repeated() = default;
@@ -352,11 +370,12 @@ class Repeated {
  * The space of a marginal or conditional taken by arbitrary indices from a non-linear
  * space. Resizing appends Linear coordinates.
  */
-template <int Size_ = Eigen::Dynamic>
+template <int Size_ = Eigen::Dynamic, int MaxSize_ = Size_>
 class CoordinateSpace {
  public:
   static constexpr int FixedSize{Size_ == Eigen::Dynamic ? 0 : Size_};
   static constexpr int Stride{Size_ == Eigen::Dynamic ? 1 : 0};
+  static constexpr int MaxSize{MaxSize_};
   static constexpr bool IsLinear{false};
 
   CoordinateSpace() : m_coordinates(std::size_t(FixedSize)) {}
@@ -409,21 +428,26 @@ class CoordinateSpace {
   std::vector<Coordinate> m_coordinates;
 };
 
-/** \returns whether a vector of size \a n fits \a Space: at least its fixed size, and
- * a whole number of repetitions beyond it.
+/** \returns whether a vector of size \a n fits \a Space: at least its fixed size, a
+ * whole number of repetitions beyond it, and at most its maximum size.
  */
 template <typename Space>
 [[nodiscard]] constexpr bool isValidSize(Eigen::Index n) {
   if constexpr (Space::Stride == 0) {
     return n == Space::FixedSize;
   } else {
-    return n >= Space::FixedSize && (n - Space::FixedSize) % Space::Stride == 0;
+    return n >= Space::FixedSize && (n - Space::FixedSize) % Space::Stride == 0 &&
+           (Space::MaxSize == Eigen::Dynamic || n <= Space::MaxSize);
   }
 }
 
 /** Compile-time size of \a Space, or \c Eigen::Dynamic if it is resizable. */
 template <typename Space>
 inline constexpr int spaceSize{Space::Stride == 0 ? Space::FixedSize : Eigen::Dynamic};
+
+/** Largest valid size of \a Space, or \c Eigen::Dynamic if it is unbounded. */
+template <typename Space>
+inline constexpr int spaceMaxSize{Space::Stride == 0 ? Space::FixedSize : Space::MaxSize};
 
 namespace internal {
 
@@ -533,15 +557,15 @@ constexpr auto makeIndex() {
  *  - a fixed block: \c seqN(fix<offset>, fix<size>);
  *  - the resizable tail: \c seq(fix<offset>, last);
  *  - a path through a repeated block to one of its coordinates, such as
- *    <tt>index<World, Vehicles, Altitude></tt>: that coordinate of every repetition,
+ *    <tt>idx<World, Vehicles, Altitude></tt>: that coordinate of every repetition,
  *    \c seq(fix<offset>, last, fix<stride>).
  *
  * A tag that appears more than once must be qualified by an enclosing tag.
  *
- * \sa indexOf()
+ * \sa idxOf()
  */
 template <typename Space, typename... Path>
-inline const auto index{internal::makeIndex<internal::resolveTags<Space, Path...>()>()};
+inline const auto idx{internal::makeIndex<internal::resolveTags<Space, Path...>()>()};
 
 /** \ingroup Spaces
  * \returns the index of repetition \a element of the repeated block \a RepeatedTag, or of
@@ -549,8 +573,8 @@ inline const auto index{internal::makeIndex<internal::resolveTags<Space, Path...
  * \c seqN(start, fix<size>).
  */
 template <typename Space, typename RepeatedTag, typename... Inner>
-[[nodiscard]] auto indexOf(Eigen::Index element) {
-  static_assert(internal::IsRepeated<RepeatedTag>, "indexOf() takes a repeated block");
+[[nodiscard]] auto idxOf(Eigen::Index element) {
+  static_assert(internal::IsRepeated<RepeatedTag>, "idxOf() takes a repeated block");
   constexpr internal::ResolvedIndex outer{internal::resolveTags<Space, RepeatedTag>()};
   constexpr internal::ResolvedIndex inner{[] {
     if constexpr (sizeof...(Inner) == 0) {
@@ -626,12 +650,13 @@ template <typename Indices>
 /** Space of the coordinates \a indices selected from \a Space: Linear if it is linear,
  * otherwise a CoordinateSpace.
  */
-template <typename Space, int SubSize>
-using ProjectedSpace = std::conditional_t<Space::IsLinear, Linear<SubSize>, CoordinateSpace<SubSize>>;
+template <typename Space, int SubSize, int SubMaxSize = SubSize>
+using ProjectedSpace =
+    std::conditional_t<Space::IsLinear, Linear<SubSize, SubMaxSize>, CoordinateSpace<SubSize, SubMaxSize>>;
 
-template <int SubSize, typename Space, typename IndexVector>
-[[nodiscard]] ProjectedSpace<Space, SubSize> projectSpace(const Space& space, Eigen::Index n,
-                                                          const IndexVector& indices) {
+template <int SubSize, int SubMaxSize, typename Space, typename IndexVector>
+[[nodiscard]] ProjectedSpace<Space, SubSize, SubMaxSize> projectSpace(const Space& space, Eigen::Index n,
+                                                                      const IndexVector& indices) {
   if constexpr (Space::IsLinear) {
     return {};
   } else {
@@ -641,7 +666,7 @@ template <int SubSize, typename Space, typename IndexVector>
     std::vector<Coordinate> picked;
     picked.reserve(std::size_t(indices.size()));
     for (const Eigen::Index i : indices) picked.push_back(all[std::size_t(i)]);
-    return ProjectedSpace<Space, SubSize>{std::move(picked)};
+    return ProjectedSpace<Space, SubSize, SubMaxSize>{std::move(picked)};
   }
 }
 

@@ -13,8 +13,8 @@ using EigenFilter::Bounded;
 using EigenFilter::Composite;
 using EigenFilter::Coordinate;
 using EigenFilter::CoordinateKind;
-using EigenFilter::index;
-using EigenFilter::indexOf;
+using EigenFilter::idx;
+using EigenFilter::idxOf;
 using EigenFilter::isValidSize;
 using EigenFilter::Linear;
 using EigenFilter::Periodic;
@@ -75,6 +75,19 @@ TEST(Space, SizesAndStrides) {
   EXPECT_TRUE(isValidSize<World>(12));
   EXPECT_FALSE(isValidSize<World>(10));
   EXPECT_FALSE(isValidSize<World>(3));
+}
+
+TEST(Space, MaximumSizes) {
+  struct Fleet : Repeated<Vehicle, 4> {};
+  using CappedWorld = Composite<Ownship, Fleet>;
+  static_assert(World::MaxSize == Eigen::Dynamic && EigenFilter::spaceMaxSize<World> == Eigen::Dynamic);
+  static_assert(CappedWorld::MaxSize == 6 + 3 * 4 && EigenFilter::spaceMaxSize<CappedWorld> == 18);
+  static_assert(EigenFilter::spaceMaxSize<State> == 5);
+  static_assert(Linear<Eigen::Dynamic, 8>::MaxSize == 8);
+  EXPECT_TRUE(isValidSize<CappedWorld>(18));
+  EXPECT_FALSE(isValidSize<CappedWorld>(21));
+  EXPECT_TRUE((isValidSize<Linear<Eigen::Dynamic, 8>>(8)));
+  EXPECT_FALSE((isValidSize<Linear<Eigen::Dynamic, 8>>(9)));
 }
 
 TEST(Space, PeriodicWrapsValuesAndDifferences) {
@@ -142,41 +155,41 @@ TEST(Space, RepeatedNormalizesEveryRepetition) {
 }
 
 TEST(SpaceIndex, FixedTags) {
-  static_assert(std::is_same_v<std::remove_cvref_t<decltype(index<State, Heading>)>, Eigen::Index>);
-  static_assert(index<State, Heading> == 3);  // usable in constant expressions
-  static_assert(index<State, Range> == 4);
+  static_assert(std::is_same_v<std::remove_cvref_t<decltype(idx<State, Heading>)>, Eigen::Index>);
+  static_assert(idx<State, Heading> == 3);  // usable in constant expressions
+  static_assert(idx<State, Range> == 4);
 
   const Eigen::Matrix<double, 5, 1> x{iota(5)};
-  const auto position{x(index<State, Position>)};
+  const auto position{x(idx<State, Position>)};
   static_assert(decltype(position)::RowsAtCompileTime == 3);
   EXPECT_EQ(Eigen::Vector3d{position}, Eigen::Vector3d(0.0, 1.0, 2.0));
 }
 
 TEST(SpaceIndex, RepeatedTail) {
   const Eigen::VectorXd x{iota(12)};
-  EXPECT_EQ(Eigen::VectorXd{x(index<World, Ownship>)}, iota(6));
-  EXPECT_EQ(Eigen::VectorXd{x(index<World, Vehicles>)}, (iota(6).array() + 6.0).matrix());
-  EXPECT_EQ(Eigen::VectorXd{x(index<World, Vehicles, Altitude>)}, Eigen::Vector2d(8.0, 11.0));
-  EXPECT_EQ(Eigen::VectorXd{x(index<World, Vehicles, Longitude>)}, Eigen::Vector2d(7.0, 10.0));
+  EXPECT_EQ(Eigen::VectorXd{x(idx<World, Ownship>)}, iota(6));
+  EXPECT_EQ(Eigen::VectorXd{x(idx<World, Vehicles>)}, (iota(6).array() + 6.0).matrix());
+  EXPECT_EQ(Eigen::VectorXd{x(idx<World, Vehicles, Altitude>)}, Eigen::Vector2d(8.0, 11.0));
+  EXPECT_EQ(Eigen::VectorXd{x(idx<World, Vehicles, Longitude>)}, Eigen::Vector2d(7.0, 10.0));
 
-  EXPECT_EQ(Eigen::Vector3d{x(indexOf<World, Vehicles>(1))}, Eigen::Vector3d(9.0, 10.0, 11.0));
-  EXPECT_EQ((indexOf<World, Vehicles, Longitude>(1)), 10);
-  EXPECT_EQ((indexOf<World, Vehicles, Altitude>(0)), 8);
+  EXPECT_EQ(Eigen::Vector3d{x(idxOf<World, Vehicles>(1))}, Eigen::Vector3d(9.0, 10.0, 11.0));
+  EXPECT_EQ((idxOf<World, Vehicles, Longitude>(1)), 10);
+  EXPECT_EQ((idxOf<World, Vehicles, Altitude>(0)), 8);
 }
 
 TEST(SpaceIndex, QualifiedPaths) {
-  static_assert(index<Sides, Left, X> == 0);
-  static_assert(index<Sides, Right, X> == 2);
-  static_assert(index<Sides, Y> == 1);  // unique, so no qualification needed
+  static_assert(idx<Sides, Left, X> == 0);
+  static_assert(idx<Sides, Right, X> == 2);
+  static_assert(idx<Sides, Y> == 1);  // unique, so no qualification needed
 }
 
 TEST(SpaceProjection, PicksCoordinates) {
   const State state{Position{}, Heading{100.0}, Range{1.0, 5.0}};
-  const auto projected{EigenFilter::internal::projectSpace<2>(state, 5, Eigen::Vector2<Eigen::Index>{4, 3})};
+  const auto projected{EigenFilter::internal::projectSpace<2, 2>(state, 5, Eigen::Vector2<Eigen::Index>{4, 3})};
   static_assert(std::is_same_v<decltype(projected), const EigenFilter::CoordinateSpace<2>>);
   EXPECT_EQ(projected.coordinate(0), (Coordinate{CoordinateKind::Bounded, 1.0, 5.0}));
   EXPECT_EQ(projected.coordinate(1), (Coordinate{CoordinateKind::Periodic, -50.0, 100.0}));
 
-  const auto linear{EigenFilter::internal::projectSpace<2>(Linear<5>{}, 5, Eigen::Vector2<Eigen::Index>{4, 3})};
+  const auto linear{EigenFilter::internal::projectSpace<2, 2>(Linear<5>{}, 5, Eigen::Vector2<Eigen::Index>{4, 3})};
   static_assert(std::is_same_v<decltype(linear), const Linear<2>>);
 }
