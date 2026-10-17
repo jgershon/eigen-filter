@@ -19,20 +19,26 @@
 #include "Moments.h"
 #include "Resampling.h"
 #include "SampleSet.h"
+#include "Space.h"
+#include "Statistics.h"
 #include "Weights.h"
 
 namespace EigenFilter {
 
-template <typename Scalar_, int Size_, int MaxSize_ = Size_>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
 class ParticleSet;
 
-template <typename Scalar_, int Size_, int MaxSize_>
+template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
 class MutableParticleSet;
 
-template <typename Scalar_, int Size_, int MaxSize_>
+template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
 class KernelDensity;
 
-template <typename Source, typename Indices>
+template <typename Source, typename Indices,
+          typename SubSpace = internal::ProjectedSpace<
+              typename Source::SpaceType,
+              internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::size,
+              internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::maxSize>>
 class ParticleSetMarginal;
 
 /** Reasons MutableParticleSet::toKernelDensity() can fail: the weights cannot be
@@ -42,46 +48,13 @@ using KernelDensityError = std::variant<WeightError, GaussianError>;
 
 namespace internal {
 
-/** Weighted mean and (biased) covariance of the columns of \a states, with weights
- * \f$ e^{\mathrm{logWeights}_i - \mathrm{logTotal}} \f$. The covariance is exactly symmetric.
+/** Silverman's rule-of-thumb bandwidth for the columns of \a states, from their
+ * covariance in \a space. Does not validate the weights; invalid weights give a
+ * non-finite result.
  */
-template <typename MomentsType, typename StatesDerived, typename WeightsDerived>
-[[nodiscard]] MomentsType weightedMoments(const Eigen::MatrixBase<StatesDerived>& states,
-                                          const Eigen::ArrayBase<WeightsDerived>& logWeights,
-                                          typename MomentsType::Scalar logTotal) {
-  using Scalar = typename MomentsType::Scalar;
-  using States = SampleSet<Scalar, MomentsType::SizeAtCompileTime, MomentsType::MaxSizeAtCompileTime>;
-  const Eigen::Array<Scalar, Eigen::Dynamic, 1> w{(logWeights - logTotal).exp()};
-  MomentsType result{states.rows()};
-  result.mean() = states * w.matrix();
-  const States scaled{(states.colwise() - result.mean()) * w.sqrt().matrix().asDiagonal()};
-  auto& cov{result.cov()};
-  if constexpr (MomentsType::MaxSizeAtCompileTime == 1) {
-    // rankUpdate() would treat the single-row matrix as a column vector.
-    cov.setConstant(scaled.squaredNorm());
-  } else {
-    cov.setZero();
-    cov.template selfadjointView<Eigen::Lower>().rankUpdate(scaled);
-    for (Eigen::Index j{1}; j < cov.cols(); ++j) {
-      for (Eigen::Index i{0}; i < j; ++i) cov(i, j) = cov(j, i);
-    }
-  }
-  return result;
-}
-
-/** Effective sample size \f$ 1 / \sum_i \hat w_i^2 \f$ of the given log-weights. */
-template <typename WeightsDerived>
-[[nodiscard]] typename WeightsDerived::Scalar effectiveSampleSize(const Eigen::ArrayBase<WeightsDerived>& logWeights,
-                                                                  typename WeightsDerived::Scalar logTotal) {
-  using Scalar = typename WeightsDerived::Scalar;
-  return Scalar(1) / (logWeights - logTotal).exp().square().sum();
-}
-
-/** Silverman's rule-of-thumb bandwidth for the columns of \a states. Does not validate
- * the weights; invalid weights give a non-finite result.
- */
-template <typename MomentsType, typename StatesDerived, typename WeightsDerived>
-[[nodiscard]] typename MomentsType::MatrixType silvermanBandwidth(const Eigen::MatrixBase<StatesDerived>& states,
+template <typename MomentsType, typename Space, typename StatesDerived, typename WeightsDerived>
+[[nodiscard]] typename MomentsType::MatrixType silvermanBandwidth(const Space& space,
+                                                                  const Eigen::MatrixBase<StatesDerived>& states,
                                                                   const Eigen::ArrayBase<WeightsDerived>& logWeights) {
   using Scalar = typename MomentsType::Scalar;
   LogSumExp<Scalar> total;
@@ -90,7 +63,7 @@ template <typename MomentsType, typename StatesDerived, typename WeightsDerived>
   const Scalar d{Scalar(states.rows())};
   const Scalar factor{Eigen::numext::pow(Scalar(4) / (effectiveSampleSize(logWeights, logTotal) * (d + Scalar(2))),
                                          Scalar(2) / (d + Scalar(4)))};
-  return factor * weightedMoments<MomentsType>(states, logWeights, logTotal).cov();
+  return factor * weightedMomentsIn<MomentsType>(space, states, logWeights, logTotal).cov();
 }
 
 /** Shared implementation of the particle set and KernelDensity conditionals.
@@ -120,19 +93,24 @@ template <typename Source, typename BandwidthDerived, typename TargetIndices, ty
   using GivenMatrix = MatrixOf<Scalar, GivenSize, GivenSize, GivenMaxSize, GivenMaxSize>;
   using CrossMatrix = MatrixOf<Scalar, TargetSize, GivenSize, TargetMaxSize, GivenMaxSize>;
   using GivenStates = SampleSet<Scalar, GivenSize, GivenMaxSize>;
+  using TargetStates = SampleSet<Scalar, TargetSize, TargetMaxSize>;
+  auto targetSpace{projectSpace<TargetSize, TargetMaxSize>(source.space(), source.particleSize(), target)};
+  const auto givenSpace{projectSpace<GivenSize, GivenMaxSize>(source.space(), source.particleSize(), given)};
 
   const Eigen::LDLT<GivenMatrix> ldlt{GivenMatrix{lowerSymmetricBlock(bandwidth, given, given)}};
   const CrossMatrix cross{lowerSymmetricBlock(bandwidth, target, given)};
   const CrossMatrix gain{ldlt.solve(cross.transpose()).transpose()};
 
-  const GivenStates offsets{source.states()(given, Eigen::placeholders::all).colwise() - values.derived()};
+  GivenStates offsets{source.states()(given, Eigen::placeholders::all).colwise() - values.derived()};
+  givenSpace.normalizeDifferences(offsets);
   const GivenStates solved{ldlt.solve(offsets)};
   const Eigen::Array<Scalar, 1, Eigen::Dynamic> wsse{(offsets.array() * solved.array()).colwise().sum()};
   const Scalar log2Pi{Eigen::numext::log(Scalar(2) * Scalar(EIGEN_PI))};
   const Scalar logNormalizer{Scalar(-0.5) * (Scalar(given.size()) * log2Pi + ldlt.vectorD().array().log().sum())};
 
-  MutableParticleSet<Scalar, TargetSize, TargetMaxSize> result{
-      SampleSet<Scalar, TargetSize, TargetMaxSize>{source.states()(target, Eigen::placeholders::all) - gain * offsets},
+  const TargetStates centers{source.states()(target, Eigen::placeholders::all) - gain * offsets};
+  MutableParticleSet<Scalar, TargetSize, TargetMaxSize, decltype(targetSpace)> result{
+      targetSpace, centers,
       Eigen::Array<Scalar, Eigen::Dynamic, 1>{source.logWeights() + logNormalizer - Scalar(0.5) * wsse.transpose()}};
   result.setBandwidth(lowerSymmetricBlock(bandwidth, target, target) - gain * cross.transpose());
   return result;
@@ -178,11 +156,15 @@ template <typename Source, typename BandwidthDerived, typename GivenIndices, typ
  * \tparam Scalar_   scalar type
  * \tparam Size_     state dimension, or \c Eigen::Dynamic
  * \tparam MaxSize_  maximum state dimension
+ * \tparam Space_    space of the states (see \ref Spaces): states are normalized when
+ *                   stored, and moments are tangent-space moments. Linear by default.
  *
  * \sa class ParticleSet, class KernelDensity, \ref Resamplers
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
 class MutableParticleSet {
+  static_assert(Size_ == Eigen::Dynamic || isValidSize<Space_>(Size_), "the size does not fit the space");
+
  public:
   using MomentsType = Moments<Scalar_, Size_, MaxSize_>;
   using Scalar = typename MomentsType::Scalar;
@@ -193,8 +175,9 @@ class MutableParticleSet {
   using SampleSetType = SampleSet<Scalar_, Size_, MaxSize_>;
   using ConstStateType = typename SampleSetType::ConstColXpr;
   using WeightArrayType = Eigen::Array<Scalar, Eigen::Dynamic, 1>;
-  using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_>;
-  using KernelDensityType = KernelDensity<Scalar_, Size_, MaxSize_>;
+  using SpaceType = Space_;
+  using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_, Space_>;
+  using KernelDensityType = KernelDensity<Scalar_, Size_, MaxSize_, Space_>;
   static constexpr int SizeAtCompileTime{Size_};
   static constexpr int MaxSizeAtCompileTime{MaxSize_};
   static constexpr bool IsMutable{true};
@@ -222,6 +205,7 @@ class MutableParticleSet {
     void setState(const Eigen::MatrixBase<Derived>& state) {
       EIGEN_FILTER_ASSERT(state.size() == m_set.particleSize());
       m_set.m_states.col(m_index) = state;
+      m_set.m_space.normalizeValues(m_set.m_states.col(m_index));
     }
 
    private:
@@ -236,7 +220,7 @@ class MutableParticleSet {
   MutableParticleSet() = default;
 
   /** Constructs an empty set whose particles will have dimension \a particleSize. */
-  explicit MutableParticleSet(Index particleSize) : m_states{particleSize, 0} {}
+  explicit MutableParticleSet(Index particleSize) : m_states{particleSize, 0} { adoptSize(); }
 
   /** Constructs a set from the columns of \a states, with equal weights summing to one. */
   template <typename StatesDerived>
@@ -250,9 +234,34 @@ class MutableParticleSet {
     assign(states, logWeights);
   }
 
+  /** Constructs an empty set in \a space whose particles will have dimension \a particleSize. */
+  MutableParticleSet(Space_ space, Index particleSize) : m_states{particleSize, 0}, m_space{std::move(space)} {
+    checkSpace();
+  }
+
+  /** Constructs a set in \a space from the columns of \a states, with equal weights summing to one. */
+  template <typename StatesDerived>
+  MutableParticleSet(Space_ space, const Eigen::MatrixBase<StatesDerived>& states)
+      : m_states{states},
+        m_logWeights{WeightArrayType::Constant(states.cols(), -Eigen::numext::log(Scalar(states.cols())))},
+        m_space{std::move(space)} {
+    checkSpace();
+  }
+
+  template <typename StatesDerived, typename WeightsDerived>
+  MutableParticleSet(Space_ space, const Eigen::MatrixBase<StatesDerived>& states,
+                     const Eigen::DenseBase<WeightsDerived>& logWeights)
+      : m_states{states}, m_logWeights{logWeights.derived().array()}, m_space{std::move(space)} {
+    EIGEN_FILTER_ASSERT(m_logWeights.size() == m_states.cols());
+    checkSpace();
+  }
+
   /** Copies the particles and any stored bandwidth. The copy starts unlocked and unborrowed. */
   MutableParticleSet(const MutableParticleSet& other)
-      : m_states{other.m_states}, m_logWeights{other.m_logWeights}, m_bandwidth{other.m_bandwidth} {}
+      : m_states{other.m_states},
+        m_logWeights{other.m_logWeights},
+        m_space{other.m_space},
+        m_bandwidth{other.m_bandwidth} {}
 
   /** Moving a locked or borrowed object is a programmer error; if \c EIGEN_FILTER_ASSERT
    * throws, the exception reaches this \c noexcept boundary and calls \c std::terminate.
@@ -260,6 +269,7 @@ class MutableParticleSet {
   MutableParticleSet(MutableParticleSet&& other) noexcept
       : m_states{std::move(other.m_states)},
         m_logWeights{std::move(other.m_logWeights)},
+        m_space{std::move(other.m_space)},
         m_bandwidth{std::move(other.m_bandwidth)},
         m_stateScratch{std::move(other.m_stateScratch)},
         m_weightScratch{std::move(other.m_weightScratch)},
@@ -273,6 +283,7 @@ class MutableParticleSet {
     assertUnborrowed();
     m_states = other.m_states;
     m_logWeights = other.m_logWeights;
+    m_space = other.m_space;
     m_bandwidth = other.m_bandwidth;
     return *this;
   }
@@ -284,6 +295,7 @@ class MutableParticleSet {
     other.assertUnborrowed();
     m_states = std::move(other.m_states);
     m_logWeights = std::move(other.m_logWeights);
+    m_space = std::move(other.m_space);
     m_bandwidth = std::move(other.m_bandwidth);
     return *this;
   }
@@ -300,6 +312,7 @@ class MutableParticleSet {
   /** \returns the dimension of every particle state */
   [[nodiscard]] Index particleSize() const { return m_states.rows(); }
 
+  [[nodiscard]] const Space_& space() const { return m_space; }
   [[nodiscard]] const SampleSetType& states() const { return m_states; }
   [[nodiscard]] const WeightArrayType& logWeights() const { return m_logWeights; }
   [[nodiscard]] ConstStateType state(Index i) const { return m_states.col(i); }
@@ -312,7 +325,7 @@ class MutableParticleSet {
    * Silverman's rule if none is stored (non-finite if the weights are invalid)
    */
   [[nodiscard]] MatrixType kdeBandwidth() const {
-    return m_bandwidth ? *m_bandwidth : internal::silvermanBandwidth<MomentsType>(m_states, m_logWeights);
+    return m_bandwidth ? *m_bandwidth : internal::silvermanBandwidth<MomentsType>(m_space, m_states, m_logWeights);
   }
 
   /** Stores \a bandwidth as the kernel covariance. Only its lower triangle is read. */
@@ -337,6 +350,7 @@ class MutableParticleSet {
     assertUnborrowed();
     m_states.resize(n, size());
     m_bandwidth.reset();
+    adoptSize();
   }
 
   void clear() {
@@ -356,6 +370,7 @@ class MutableParticleSet {
     if (states.rows() != particleSize()) m_bandwidth.reset();
     m_states = states;
     m_logWeights.setConstant(size(), -Eigen::numext::log(Scalar(size())));
+    adoptSize();
   }
 
   /** Replaces the particles and weights. Clears the bandwidth if the dimension changes. */
@@ -367,6 +382,7 @@ class MutableParticleSet {
     if (states.rows() != particleSize()) m_bandwidth.reset();
     m_states = states;
     m_logWeights = logWeights.derived().array();
+    adoptSize();
   }
 
   /** Appends a particle. Costs O(size()) because the storage is contiguous.
@@ -382,6 +398,7 @@ class MutableParticleSet {
     m_states.conservativeResize(Eigen::NoChange, i + 1);
     m_logWeights.conservativeResize(i + 1);
     m_states.col(i) = state;
+    m_space.normalizeValues(m_states.col(i));
     m_logWeights(i) = logWeight;
     return i;
   }
@@ -391,6 +408,7 @@ class MutableParticleSet {
     assertUnlocked();
     assertUnborrowed();
     EIGEN_FILTER_ASSERT(other.particleSize() == particleSize());
+    EIGEN_FILTER_ASSERT(other.m_space == m_space && "cannot append a set in a different space");
     const Index n{size()};
     const Index m{other.size()};
     m_states.conservativeResize(Eigen::NoChange, n + m);
@@ -419,6 +437,7 @@ class MutableParticleSet {
     assertIndex(i);
     EIGEN_FILTER_ASSERT(state.size() == particleSize());
     m_states.col(i) = state;
+    m_space.normalizeValues(m_states.col(i));
   }
 
   /** Sets every state at once. \a states must have the current dimensions. */
@@ -427,6 +446,7 @@ class MutableParticleSet {
     assertUnlocked();
     EIGEN_FILTER_ASSERT(states.rows() == particleSize() && states.cols() == size());
     m_states = states;
+    m_space.normalizeValues(m_states);
   }
 
   void setLogWeight(Index i, Scalar logWeight) {
@@ -583,6 +603,15 @@ class MutableParticleSet {
     return ParticleSetMarginal<MutableParticleSet, Indices>{*this, indices};
   }
 
+  /** marginal() of the subspace named by the tag path \a Path (see idx<>), whose space is
+   * that subspace with its parameters.
+   */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  [[nodiscard]] auto marginal() const {
+    return internal::tagMarginal<ParticleSetMarginal, Path...>(*this);
+  }
+
   /** \returns a copy of the kernel density estimate's distribution of the entries
    * \a target given that the entries \a given equal \a values.
    *
@@ -600,6 +629,14 @@ class MutableParticleSet {
   template <typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
     return internal::conditionalParticles(*this, kdeBandwidth(), given, values);
+  }
+
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  template <typename... GivenPath, typename Derived>
+    requires(sizeof...(GivenPath) > 0)
+  [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(*this, kdeBandwidth(), internal::asIndexSet(idx<Space_, GivenPath...>),
+                                          values);
   }
 
   /** Validates the weights (see logTotalWeight()).
@@ -655,6 +692,23 @@ class MutableParticleSet {
     EIGEN_FILTER_ASSERT(i >= 0 && i < size() && "particle index out of range");
   }
 
+  /** Sizes a runtime space to the states, checks the size fits, and normalizes the states. */
+  void adoptSize() {
+    if constexpr (requires { m_space.resize(particleSize()); }) {
+      if (m_space.size() != particleSize()) m_space.resize(particleSize());
+    }
+    checkSpace();
+  }
+
+  /** Checks that the states fit the space and normalizes them. */
+  void checkSpace() {
+    if constexpr (requires { m_space.size(); }) {
+      EIGEN_FILTER_ASSERT(m_space.size() == particleSize() && "the space has a different number of coordinates");
+    }
+    EIGEN_FILTER_ASSERT(isValidSize<Space_>(particleSize()) && "the size does not fit the space");
+    m_space.normalizeValues(m_states);
+  }
+
   /** Removes particles whose index satisfies \a removeAtIndex, keeping the rest in order.
    *
    * \returns the log of the sum of the removed weights
@@ -681,6 +735,7 @@ class MutableParticleSet {
 
   SampleSetType m_states{Size_ == Eigen::Dynamic ? 0 : Size_, 0};
   WeightArrayType m_logWeights;
+  EIGEN_FILTER_NO_UNIQUE_ADDRESS Space_ m_space;
   std::optional<MatrixType> m_bandwidth;
   // Resampling scratch, kept to avoid reallocating on every resample.
   SampleSetType m_stateScratch;
@@ -703,10 +758,11 @@ class MutableParticleSet {
  *
  * \sa class MutableParticleSet, class KernelDensity
  */
-template <typename Scalar_, int Size_, int MaxSize_>
+template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
 class ParticleSet {
  public:
-  using MutableType = MutableParticleSet<Scalar_, Size_, MaxSize_>;
+  using MutableType = MutableParticleSet<Scalar_, Size_, MaxSize_, Space_>;
+  using SpaceType = Space_;
   using MomentsType = typename MutableType::MomentsType;
   using Scalar = typename MutableType::Scalar;
   using Index = typename MutableType::Index;
@@ -744,6 +800,7 @@ class ParticleSet {
   /** \returns the number of particles */
   [[nodiscard]] Index size() const { return source().size(); }
   [[nodiscard]] Index particleSize() const { return source().particleSize(); }
+  [[nodiscard]] const Space_& space() const { return source().space(); }
   [[nodiscard]] const SampleSetType& states() const { return source().states(); }
   [[nodiscard]] const WeightArrayType& logWeights() const { return source().logWeights(); }
   [[nodiscard]] ConstStateType state(Index i) const { return source().state(i); }
@@ -766,10 +823,11 @@ class ParticleSet {
    * \f$ \mu = \sum_i \hat w_i x_i \f$ and \f$ \Sigma = \sum_i \hat w_i (x_i - \mu)(x_i - \mu)^T \f$.
    *
    * The covariance is the plain weighted (biased) estimate and is exactly symmetric.
-   * It excludes any kernel bandwidth; see KernelDensity::moments() for that.
+   * It excludes any kernel bandwidth; see KernelDensity::moments() for that. In a
+   * non-linear space these are tangent-space moments.
    */
   [[nodiscard]] MomentsType moments() const {
-    return internal::weightedMoments<MomentsType>(states(), logWeights(), logTotalWeight());
+    return internal::weightedMomentsIn<MomentsType>(space(), states(), logWeights(), logTotalWeight());
   }
 
   /** \returns a read-only view of the state entries \a indices. It holds a copy of
@@ -778,6 +836,13 @@ class ParticleSet {
   template <typename Indices>
   [[nodiscard]] ParticleSetMarginal<ParticleSet, Indices> marginal(const Indices& indices) const {
     return ParticleSetMarginal<ParticleSet, Indices>{*this, indices};
+  }
+
+  /** marginal() of the subspace named by the tag path \a Path; see MutableParticleSet::marginal(). */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  [[nodiscard]] auto marginal() const {
+    return internal::tagMarginal<ParticleSetMarginal, Path...>(*this);
   }
 
   /** \returns a copy of the conditional distribution; see MutableParticleSet::conditional(). */
@@ -791,6 +856,14 @@ class ParticleSet {
   template <typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
     return internal::conditionalParticles(*this, kdeBandwidth(), given, values);
+  }
+
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  template <typename... GivenPath, typename Derived>
+    requires(sizeof...(GivenPath) > 0)
+  [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
+    return internal::conditionalParticles(*this, kdeBandwidth(), internal::asIndexSet(idx<Space_, GivenPath...>),
+                                          values);
   }
 
  private:
@@ -823,10 +896,11 @@ class ParticleSet {
  * estimate exact: the marginal of a KDE is the KDE of the marginal particles with
  * bandwidth \f$ H_{aa} \f$.
  *
- * \tparam Source   MutableParticleSet or ParticleSet
- * \tparam Indices  the index type passed to marginal()
+ * \tparam Source    MutableParticleSet or ParticleSet
+ * \tparam Indices   the index type passed to marginal()
+ * \tparam SubSpace  space of the selected coordinates
  */
-template <typename Source, typename Indices>
+template <typename Source, typename Indices, typename SubSpace>
 class ParticleSetMarginal {
   using Selection = internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>;
 
@@ -835,17 +909,32 @@ class ParticleSetMarginal {
   using Index = Eigen::Index;
   static constexpr int SizeAtCompileTime{Selection::size};
   static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
-  using MutableType = MutableParticleSet<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime>;
+  using SpaceType = SubSpace;
+  using MutableType = MutableParticleSet<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime, SubSpace>;
   using MatrixType = typename MutableType::MatrixType;
   using WeightArrayType = typename MutableType::WeightArrayType;
   using IndexVectorType = typename Selection::type;
 
+  /** Selects \a indices, projecting the source's space onto them. */
   ParticleSetMarginal(const Source& source, const Indices& indices)
       : m_holder{source},
         m_indices{internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(
-            source.particleSize(), indices)} {
+            source.particleSize(), indices)},
+        m_space{internal::projectSpace<SizeAtCompileTime, MaxSizeAtCompileTime>(source.space(), source.particleSize(),
+                                                                                m_indices)} {
     EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
   }
+
+  /** Selects \a indices, whose coordinates form \a space. */
+  ParticleSetMarginal(const Source& source, const Indices& indices, SubSpace space)
+      : m_holder{source},
+        m_indices{internal::resolveIndices<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>(
+            source.particleSize(), indices)},
+        m_space{std::move(space)} {
+    EIGEN_FILTER_ASSERT(internal::distinctIndices(m_indices) && "marginal indices must be distinct");
+  }
+
+  [[nodiscard]] const SubSpace& space() const { return m_space; }
 
   /** \returns the number of particles */
   [[nodiscard]] Index size() const { return source().size(); }
@@ -871,7 +960,7 @@ class ParticleSetMarginal {
    * source's weights and the marginal of any stored bandwidth
    */
   [[nodiscard]] MutableType copy() const {
-    MutableType result{states(), logWeights()};
+    MutableType result{m_space, states(), logWeights()};
     if (const auto h{bandwidth()}) result.setBandwidth(*h);
     return result;
   }
@@ -881,6 +970,7 @@ class ParticleSetMarginal {
 
   internal::HolderFor<Source> m_holder;
   IndexVectorType m_indices;
+  SubSpace m_space;
 };
 
 /** \returns Silverman's rule-of-thumb bandwidth
@@ -890,11 +980,11 @@ class ParticleSetMarginal {
  *
  * Near-optimal for roughly Gaussian particle clouds; scale it down for multimodal ones.
  */
-template <typename Scalar, int Size, int MaxSize>
-[[nodiscard]] typename ParticleSet<Scalar, Size, MaxSize>::MatrixType silvermanBandwidth(
-    const ParticleSet<Scalar, Size, MaxSize>& particles) {
-  return internal::silvermanBandwidth<typename ParticleSet<Scalar, Size, MaxSize>::MomentsType>(particles.states(),
-                                                                                                particles.logWeights());
+template <typename Scalar, int Size, int MaxSize, typename Space>
+[[nodiscard]] typename ParticleSet<Scalar, Size, MaxSize, Space>::MatrixType silvermanBandwidth(
+    const ParticleSet<Scalar, Size, MaxSize, Space>& particles) {
+  return internal::silvermanBandwidth<typename ParticleSet<Scalar, Size, MaxSize, Space>::MomentsType>(
+      particles.space(), particles.states(), particles.logWeights());
 }
 
 }  // namespace EigenFilter

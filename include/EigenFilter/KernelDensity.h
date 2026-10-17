@@ -30,10 +30,11 @@ namespace EigenFilter {
  *
  * \sa kernelDensity(), silvermanBandwidth(), class ParticleSet
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_>
+template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
 class KernelDensity {
  public:
-  using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_>;
+  using SpaceType = Space_;
+  using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_, Space_>;
   using KernelType = MutableGaussian<Scalar_, Size_, MaxSize_>;
   using MomentsType = typename ParticleSetType::MomentsType;
   using Scalar = typename ParticleSetType::Scalar;
@@ -59,6 +60,7 @@ class KernelDensity {
   /** \returns the number of particles */
   [[nodiscard]] Index size() const { return m_particles.size(); }
   [[nodiscard]] Index particleSize() const { return m_particles.particleSize(); }
+  [[nodiscard]] const Space_& space() const { return m_particles.space(); }
   [[nodiscard]] const ParticleSetType& particles() const { return m_particles; }
 
   /** \returns the kernel covariance \f$ H \f$ */
@@ -88,6 +90,7 @@ class KernelDensity {
     EIGEN_FILTER_ASSERT(x.size() == particleSize());
     const auto kernel{this->kernel()};
     SampleSetType residuals{m_particles.states().colwise() - x.derived()};
+    space().normalizeDifferences(residuals);
     kernel.llt().matrixL().solveInPlace(residuals);
     internal::LogSumExp<Scalar> sum;
     for (Index i{0}; i < size(); ++i) {
@@ -140,10 +143,10 @@ class KernelDensity {
 /** \returns a kernel density estimate over \a particles with bandwidth \a bandwidth,
  *          or a GaussianError if \a bandwidth is not positive definite or not finite.
  */
-template <typename Scalar, int Size, int MaxSize, typename Derived>
-[[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize>, GaussianError> kernelDensity(
-    const ParticleSet<Scalar, Size, MaxSize>& particles, const Eigen::MatrixBase<Derived>& bandwidth) {
-  return KernelDensity<Scalar, Size, MaxSize>::create(particles, bandwidth);
+template <typename Scalar, int Size, int MaxSize, typename Space, typename Derived>
+[[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize, Space>, GaussianError> kernelDensity(
+    const ParticleSet<Scalar, Size, MaxSize, Space>& particles, const Eigen::MatrixBase<Derived>& bandwidth) {
+  return KernelDensity<Scalar, Size, MaxSize, Space>::create(particles, bandwidth);
 }
 
 /** \returns a kernel density estimate over \a particles with their kdeBandwidth(): the
@@ -151,9 +154,9 @@ template <typename Scalar, int Size, int MaxSize, typename Derived>
  *          with a GaussianError if that bandwidth is not positive definite (for
  *          example, Silverman's rule when every particle has the same state).
  */
-template <typename Scalar, int Size, int MaxSize>
-[[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize>, GaussianError> kernelDensity(
-    const ParticleSet<Scalar, Size, MaxSize>& particles) {
+template <typename Scalar, int Size, int MaxSize, typename Space>
+[[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize, Space>, GaussianError> kernelDensity(
+    const ParticleSet<Scalar, Size, MaxSize, Space>& particles) {
   return kernelDensity(particles, particles.kdeBandwidth());
 }
 
@@ -167,10 +170,10 @@ template <typename Scalar, int Size, int MaxSize>
  *
  * \sa drawSamplesWithLogPdf(const KernelDensity&, Eigen::Index, G&, const R&), \ref Resamplers
  */
-template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_generator G,
+template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G,
           typename R = MultinomialResampler>
   requires Resampler<R, Scalar, G>
-[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const KernelDensity<Scalar, Size, MaxSize>& kde,
+[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const KernelDensity<Scalar, Size, MaxSize, Space>& kde,
                                                            Eigen::Index n, G& rng, const R& resampler = {}) {
   EIGEN_FILTER_ASSERT(n >= 0);
   using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
@@ -185,6 +188,7 @@ template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_genera
   SampleSetType samples{kde.kernel().llt().matrixL() *
                         internal::standardNormal<SampleSetType>(kde.particleSize(), n, rng)};
   for (Eigen::Index j{0}; j < n; ++j) samples.col(j) += particles.state(ancestors[std::size_t(j)]);
+  kde.space().normalizeValues(samples);
   return samples;
 }
 
@@ -196,11 +200,11 @@ template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_genera
  *
  * \sa drawSamples(const KernelDensity&, Eigen::Index, G&, const R&)
  */
-template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_generator G,
+template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G,
           typename R = MultinomialResampler>
   requires Resampler<R, Scalar, G>
 [[nodiscard]] SamplesWithLogPdf<Scalar, Size, MaxSize> drawSamplesWithLogPdf(
-    const KernelDensity<Scalar, Size, MaxSize>& kde, Eigen::Index n, G& rng, const R& resampler = {}) {
+    const KernelDensity<Scalar, Size, MaxSize, Space>& kde, Eigen::Index n, G& rng, const R& resampler = {}) {
   SamplesWithLogPdf<Scalar, Size, MaxSize> result{drawSamples(kde, n, rng, resampler), {}};
   result.logPdf.resize(n);
   for (Eigen::Index j{0}; j < n; ++j) result.logPdf(j) = kde.logPdf(result.samples.col(j));
