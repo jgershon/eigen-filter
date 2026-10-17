@@ -44,33 +44,42 @@ template <typename Matrix, std::uniform_random_bit_generator G>
  *
  * \sa drawSamplesWithLogPdf()
  */
-template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_generator G>
-[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const Gaussian<Scalar, Size, MaxSize>& gaussian,
+template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
+[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const Gaussian<Scalar, Size, MaxSize, Space>& gaussian,
                                                            Eigen::Index n, G& rng) {
   EIGEN_FILTER_ASSERT(n >= 0);
   using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
   SampleSetType samples{gaussian.llt().matrixL() * internal::standardNormal<SampleSetType>(gaussian.size(), n, rng)};
   samples.colwise() += gaussian.mean();
+  gaussian.space().normalizeValues(samples);
   return samples;
 }
 
 /** \returns \a n independent draws from \a gaussian, one per column, with the
  * log-density of \a gaussian at each.
  *
- * The log-densities cost almost nothing extra: for \f$ x = \mu + L z \f$ the
- * squared Mahalanobis distance is \f$ \|z\|^2 \f$.
+ * The log-densities cost almost nothing extra in a linear space: for
+ * \f$ x = \mu + L z \f$ the squared Mahalanobis distance is \f$ \|z\|^2 \f$. In other
+ * spaces each is Gaussian::logPdf() of the stored sample, so a draw that wraps far
+ * around a periodic coordinate gets the nearest-image density, matching logPdf().
  *
  * \sa drawSamples()
  */
-template <typename Scalar, int Size, int MaxSize, std::uniform_random_bit_generator G>
+template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
 [[nodiscard]] SamplesWithLogPdf<Scalar, Size, MaxSize> drawSamplesWithLogPdf(
-    const Gaussian<Scalar, Size, MaxSize>& gaussian, Eigen::Index n, G& rng) {
+    const Gaussian<Scalar, Size, MaxSize, Space>& gaussian, Eigen::Index n, G& rng) {
   EIGEN_FILTER_ASSERT(n >= 0);
   using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
   const SampleSetType z{internal::standardNormal<SampleSetType>(gaussian.size(), n, rng)};
   SamplesWithLogPdf<Scalar, Size, MaxSize> result{gaussian.llt().matrixL() * z, {}};
   result.samples.colwise() += gaussian.mean();
-  result.logPdf = gaussian.logPeak() - Scalar(0.5) * z.colwise().squaredNorm().transpose().array();
+  if constexpr (Space::IsLinear) {
+    result.logPdf = gaussian.logPeak() - Scalar(0.5) * z.colwise().squaredNorm().transpose().array();
+  } else {
+    gaussian.space().normalizeValues(result.samples);
+    result.logPdf.resize(n);
+    for (Eigen::Index j{0}; j < n; ++j) result.logPdf(j) = gaussian.logPdf(result.samples.col(j));
+  }
   return result;
 }
 

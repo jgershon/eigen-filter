@@ -2,6 +2,7 @@
 
 #include "Macros.h"
 #include "Indexing.h"
+#include "Space.h"
 #include "Moments.h"
 #include "Gaussian.h"
 #include "GaussianMixture.h"
