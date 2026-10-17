@@ -10,15 +10,20 @@
 
 namespace EigenFilter {
 
-/** Samples together with the log of the density they were drawn from, evaluated at each.
+/** Samples in \a Space together with the log of the density they were drawn from,
+ * evaluated at each.
  *
- * \sa drawSamplesWithLogPdf()
+ * \sa drawSamplesWithLogPdf(), SamplesWithLogPdfN
  */
-template <typename Scalar, int Size, int MaxSize = Size>
+template <typename Scalar, typename Space>
 struct SamplesWithLogPdf {
-  SampleSet<Scalar, Size, MaxSize> samples;        ///< one sample per column
+  SampleSet<Scalar, Space> samples;                ///< one sample per column
   Eigen::Array<Scalar, Eigen::Dynamic, 1> logPdf;  ///< \c logPdf(i) is the log-density at \c samples.col(i)
 };
+
+/** SamplesWithLogPdf of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using SamplesWithLogPdfN = SamplesWithLogPdf<Scalar, Linear<Size, MaxSize>>;
 
 namespace internal {
 
@@ -44,11 +49,10 @@ template <typename Matrix, std::uniform_random_bit_generator G>
  *
  * \sa drawSamplesWithLogPdf()
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const Gaussian<Scalar, Size, MaxSize, Space>& gaussian,
-                                                           Eigen::Index n, G& rng) {
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
+[[nodiscard]] SampleSet<Scalar, Space> drawSamples(const Gaussian<Scalar, Space>& gaussian, Eigen::Index n, G& rng) {
   EIGEN_FILTER_ASSERT(n >= 0);
-  using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
+  using SampleSetType = SampleSet<Scalar, Space>;
   SampleSetType samples{gaussian.llt().matrixL() * internal::standardNormal<SampleSetType>(gaussian.size(), n, rng)};
   samples.colwise() += gaussian.mean();
   gaussian.space().normalizeValues(samples);
@@ -65,13 +69,13 @@ template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_r
  *
  * \sa drawSamples()
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] SamplesWithLogPdf<Scalar, Size, MaxSize> drawSamplesWithLogPdf(
-    const Gaussian<Scalar, Size, MaxSize, Space>& gaussian, Eigen::Index n, G& rng) {
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
+[[nodiscard]] SamplesWithLogPdf<Scalar, Space> drawSamplesWithLogPdf(const Gaussian<Scalar, Space>& gaussian,
+                                                                     Eigen::Index n, G& rng) {
   EIGEN_FILTER_ASSERT(n >= 0);
-  using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
+  using SampleSetType = SampleSet<Scalar, Space>;
   const SampleSetType z{internal::standardNormal<SampleSetType>(gaussian.size(), n, rng)};
-  SamplesWithLogPdf<Scalar, Size, MaxSize> result{gaussian.llt().matrixL() * z, {}};
+  SamplesWithLogPdf<Scalar, Space> result{gaussian.llt().matrixL() * z, {}};
   result.samples.colwise() += gaussian.mean();
   if constexpr (Space::IsLinear) {
     result.logPdf = gaussian.logPeak() - Scalar(0.5) * z.colwise().squaredNorm().transpose().array();

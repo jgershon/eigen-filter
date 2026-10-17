@@ -37,10 +37,10 @@ struct ComponentError {
 /** Reasons MutableGaussianMixture::toGaussianMixture() can fail. */
 using GaussianMixtureError = std::variant<WeightError, ComponentError>;
 
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class GaussianMixture;
 
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class MutableGaussianMixture;
 
 template <typename Source, typename Indices,
@@ -67,9 +67,7 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
       source.space(), source.componentSize(), target)};
   const auto givenSpace{projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(
       source.space(), source.componentSize(), given)};
-  MutableGaussianMixture<typename Source::Scalar, Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime,
-                         decltype(targetSpace)>
-      result{targetSpace, target.size()};
+  MutableGaussianMixture<typename Source::Scalar, decltype(targetSpace)> result{targetSpace, target.size()};
   result.reserve(source.size());
   for (const auto& component : source) {
     auto conditioned{conditionMoments(component.gaussian.mean(), component.gaussian.cov(), target, given, values,
@@ -117,26 +115,25 @@ template <typename Source, typename GivenIndices, typename Derived>
  * Every component shares the mixture's space (see \ref Spaces): component means are
  * normalized when set, and moments() averages in the space's tangent space.
  *
- * \tparam Scalar_   scalar type
- * \tparam Size_     component dimension, or \c Eigen::Dynamic
- * \tparam MaxSize_  maximum component dimension
- * \tparam Space_    space of the components; Linear by default
+ * \tparam Scalar_  scalar type
+ * \tparam Space_   space of the components, which sets their dimension and storage
+ *                  bound (see \ref Spaces)
  *
- * \sa class GaussianMixture, class MutableGaussian
+ * \sa class GaussianMixture, class MutableGaussian, MutableGaussianMixtureN
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class MutableGaussianMixture {
  public:
   using SpaceType = Space_;
-  using ComponentGaussianType = MutableGaussian<Scalar_, Size_, MaxSize_, Space_>;
+  using ComponentGaussianType = MutableGaussian<Scalar_, Space_>;
   using MomentsType = typename ComponentGaussianType::MomentsType;
   using Scalar = typename ComponentGaussianType::Scalar;
   using Index = typename ComponentGaussianType::Index;
   using VectorType = typename ComponentGaussianType::VectorType;
   using MatrixType = typename ComponentGaussianType::MatrixType;
-  using GaussianMixtureType = GaussianMixture<Scalar_, Size_, MaxSize_, Space_>;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  using GaussianMixtureType = GaussianMixture<Scalar_, Space_>;
+  static constexpr int SizeAtCompileTime{ComponentGaussianType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{ComponentGaussianType::MaxSizeAtCompileTime};
   static constexpr bool IsMutable{true};
 
   /** One weighted component. Only ever exposed as const outside the mixture. */
@@ -615,8 +612,8 @@ class MutableGaussianMixture {
   };
 
   static void assertValidComponentSize(Index n) {
-    EIGEN_FILTER_ASSERT(n >= 0 && (Size_ == Eigen::Dynamic || n == Size_) &&
-                        (MaxSize_ == Eigen::Dynamic || n <= MaxSize_));
+    EIGEN_FILTER_ASSERT(n >= 0 && (SizeAtCompileTime == Eigen::Dynamic || n == SizeAtCompileTime) &&
+                        (MaxSizeAtCompileTime == Eigen::Dynamic || n <= MaxSizeAtCompileTime));
     EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
   }
 
@@ -688,7 +685,7 @@ class MutableGaussianMixture {
   }
 
   std::vector<Component> m_components;
-  Index m_componentSize{Size_ == Eigen::Dynamic ? 0 : Size_};
+  Index m_componentSize{SizeAtCompileTime == Eigen::Dynamic ? 0 : SizeAtCompileTime};
   EIGEN_FILTER_NO_UNIQUE_ADDRESS Space_ m_space;
   // Filled by the const factorize() for use by views.
   mutable Scalar m_logTotalWeight{};
@@ -705,12 +702,12 @@ class MutableGaussianMixture {
  * GaussianMixture locks the source; copies share the lock and the last one to be
  * destroyed releases it. A GaussianMixture must not outlive its source.
  *
- * \sa class MutableGaussianMixture
+ * \sa class MutableGaussianMixture, GaussianMixtureN
  */
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class GaussianMixture {
  public:
-  using MutableType = MutableGaussianMixture<Scalar_, Size_, MaxSize_, Space_>;
+  using MutableType = MutableGaussianMixture<Scalar_, Space_>;
   using SpaceType = Space_;
   using Component = typename MutableType::Component;
   using const_iterator = typename MutableType::const_iterator;
@@ -719,8 +716,8 @@ class GaussianMixture {
   using Index = typename MutableType::Index;
   using VectorType = typename MutableType::VectorType;
   using MatrixType = typename MutableType::MatrixType;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr int SizeAtCompileTime{MutableType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{MutableType::MaxSizeAtCompileTime};
   static constexpr bool IsMutable{false};
 
   GaussianMixture(const GaussianMixture& other) : m_source{other.m_source} { lock(); }
@@ -773,7 +770,7 @@ class GaussianMixture {
    * Only the lower triangle of each component covariance is read; the result is symmetric.
    */
   [[nodiscard]] MomentsType moments() const {
-    SampleSet<Scalar, Size_, MaxSize_> means{componentSize(), size()};
+    SampleSet<Scalar, Space_> means{componentSize(), size()};
     Eigen::Array<Scalar, Eigen::Dynamic, 1> logWeights{size()};
     Index i{0};
     for (const auto& component : *this) {
@@ -897,10 +894,10 @@ class GaussianMixtureMarginal {
  public:
   using Scalar = typename Source::Scalar;
   using Index = Eigen::Index;
-  static constexpr int SizeAtCompileTime{Selection::size};
-  static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
+  static constexpr int SizeAtCompileTime{spaceSize<SubSpace>};
+  static constexpr int MaxSizeAtCompileTime{spaceMaxSize<SubSpace>};
   using SpaceType = SubSpace;
-  using MutableType = MutableGaussianMixture<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime, SubSpace>;
+  using MutableType = MutableGaussianMixture<Scalar, SubSpace>;
   using MomentsType = typename MutableType::MomentsType;
   using IndexVectorType = typename Selection::type;
 
@@ -972,13 +969,12 @@ class GaussianMixtureMarginal {
  *
  * \sa drawSamplesWithLogPdf(const GaussianMixture&, Eigen::Index, G&, const R&), \ref Resamplers
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G,
-          typename R = MultinomialResampler>
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G, typename R = MultinomialResampler>
   requires Resampler<R, Scalar, G>
-[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const GaussianMixture<Scalar, Size, MaxSize, Space>& mixture,
-                                                           Eigen::Index n, G& rng, const R& resampler = {}) {
+[[nodiscard]] SampleSet<Scalar, Space> drawSamples(const GaussianMixture<Scalar, Space>& mixture, Eigen::Index n,
+                                                   G& rng, const R& resampler = {}) {
   EIGEN_FILTER_ASSERT(n >= 0);
-  using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
+  using SampleSetType = SampleSet<Scalar, Space>;
   std::vector<Scalar> weights;
   weights.reserve(std::size_t(mixture.size()));
   for (const auto& component : mixture) {
@@ -1006,15 +1002,22 @@ template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_r
  *
  * \sa drawSamples(const GaussianMixture&, Eigen::Index, G&, const R&)
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G,
-          typename R = MultinomialResampler>
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G, typename R = MultinomialResampler>
   requires Resampler<R, Scalar, G>
-[[nodiscard]] SamplesWithLogPdf<Scalar, Size, MaxSize> drawSamplesWithLogPdf(
-    const GaussianMixture<Scalar, Size, MaxSize, Space>& mixture, Eigen::Index n, G& rng, const R& resampler = {}) {
-  SamplesWithLogPdf<Scalar, Size, MaxSize> result{drawSamples(mixture, n, rng, resampler), {}};
+[[nodiscard]] SamplesWithLogPdf<Scalar, Space> drawSamplesWithLogPdf(const GaussianMixture<Scalar, Space>& mixture,
+                                                                     Eigen::Index n, G& rng, const R& resampler = {}) {
+  SamplesWithLogPdf<Scalar, Space> result{drawSamples(mixture, n, rng, resampler), {}};
   result.logPdf.resize(n);
   for (Eigen::Index j{0}; j < n; ++j) result.logPdf(j) = mixture.logPdf(result.samples.col(j));
   return result;
 }
+
+/** A MutableGaussianMixture of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using MutableGaussianMixtureN = MutableGaussianMixture<Scalar, Linear<Size, MaxSize>>;
+
+/** A GaussianMixture view of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using GaussianMixtureN = GaussianMixture<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter

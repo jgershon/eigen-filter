@@ -15,7 +15,6 @@
 using EigenFilter::Composite;
 using EigenFilter::CoordinateKind;
 using EigenFilter::Linear;
-using EigenFilter::MutableGaussian;
 using EigenFilter::MutableGaussianMixture;
 using EigenFilter::MutableParticleSet;
 using EigenFilter::Periodic;
@@ -29,8 +28,8 @@ struct Heading : Periodic<> {
   using Periodic::Periodic;
 };
 using State = Composite<Position, Heading>;
-using Particles = MutableParticleSet<double, 2, 2, State>;
-using Mixture = MutableGaussianMixture<double, 2, 2, State>;
+using Particles = MutableParticleSet<double, State>;
+using Mixture = MutableGaussianMixture<double, State>;
 
 // Distance around the circle between two headings.
 double angularGap(double a, double b) { return std::abs(std::remainder(a - b, 2 * pi)); }
@@ -83,7 +82,7 @@ TEST(SpaceParticles, KernelDensityWrapsResiduals) {
 TEST(SpaceParticles, ConditionalWrapsAndKeepsTheTargetSpace) {
   struct Swapped : Composite<Heading, Position> {};
   Eigen::Matrix<double, 2, 4> states{{pi - 0.1, pi - 0.1, -pi + 0.1, -pi + 0.1}, {1.0, 2.0, 1.0, 2.0}};
-  MutableParticleSet<double, 2, 2, Swapped> set{Swapped{}, states};
+  MutableParticleSet<double, Swapped> set{Swapped{}, states};
   set.setBandwidth(Eigen::Matrix2d{{0.02, 0.0}, {0.0, 0.1}});
   // Conditioning on heading -π + 0.1 weights both particle groups the same way as π - 0.1 would.
   const auto a{set.conditional(std::array{1}, std::array{0}, Eigen::Matrix<double, 1, 1>{-pi + 0.1})};

@@ -10,8 +10,9 @@
 #include <utility>
 
 using EigenFilter::GaussianError;
-using EigenFilter::MutableGaussian;
+using EigenFilter::MutableGaussianN;
 using EigenFilter::MutableParticleSet;
+using EigenFilter::MutableParticleSetN;
 
 namespace {
 
@@ -20,7 +21,7 @@ constexpr double inf{std::numeric_limits<double>::infinity()};
 // Each config names a MutableParticleSet type and the particle dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableParticleSet<Scalar, Size, MaxSize>;
+  using Type = MutableParticleSetN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -79,7 +80,7 @@ TYPED_TEST(KernelDensityTest, LogPdfMatchesSumOfKernels) {
   double total{0};
   for (Eigen::Index i{0}; i < set.size(); ++i) {
     const typename TestFixture::VectorType center{set.state(i)};
-    const MutableGaussian<Scalar, TestFixture::MPS::SizeAtCompileTime, TestFixture::MPS::MaxSizeAtCompileTime> kernel{
+    const MutableGaussianN<Scalar, TestFixture::MPS::SizeAtCompileTime, TestFixture::MPS::MaxSizeAtCompileTime> kernel{
         center, this->makeBandwidth()};
     const double w{std::exp(double(set.logWeight(i)))};
     density += w * std::exp(double(kernel.toGaussian()->logPdf(x)));
@@ -118,18 +119,18 @@ TYPED_TEST(KernelDensityTest, SilvermanBandwidth) {
 TEST(KernelDensity, SingleParticleIsGaussian) {
   const Eigen::Vector2d center{1.0, -2.0};
   const Eigen::Matrix2d h{{2.0, 0.5}, {0.5, 1.0}};
-  const MutableParticleSet<double, 2> set{Eigen::Matrix<double, 2, 1>{center}};
+  const MutableParticleSetN<double, 2> set{Eigen::Matrix<double, 2, 1>{center}};
   const auto view{set.toParticleSet()};
   const auto kde{EigenFilter::kernelDensity(*view, h)};
   ASSERT_TRUE(kde.has_value());
 
-  const MutableGaussian<double, 2> gaussian{center, h};
+  const MutableGaussianN<double, 2> gaussian{center, h};
   const Eigen::Vector2d x{0.3, 0.4};
   EXPECT_NEAR(kde->logPdf(x), gaussian.toGaussian()->logPdf(x), 1e-12);
 }
 
 TEST(KernelDensity, DegenerateParticlesFail) {
-  const MutableParticleSet<double, 2> set{Eigen::Matrix<double, 2, 4>::Ones()};
+  const MutableParticleSetN<double, 2> set{Eigen::Matrix<double, 2, 4>::Ones()};
   const auto view{set.toParticleSet()};
   const auto kde{EigenFilter::kernelDensity(*view)};
   ASSERT_FALSE(kde.has_value());
@@ -137,9 +138,9 @@ TEST(KernelDensity, DegenerateParticlesFail) {
 }
 
 TEST(KernelDensity, KeepsParticleSetLocked) {
-  MutableParticleSet<double, 2> set{Eigen::Matrix<double, 2, 3>::Random()};
+  MutableParticleSetN<double, 2> set{Eigen::Matrix<double, 2, 3>::Random()};
   {
-    std::optional<EigenFilter::KernelDensity<double, 2>> kde;
+    std::optional<EigenFilter::KernelDensityN<double, 2>> kde;
     {
       const auto view{set.toParticleSet()};
       kde.emplace(*EigenFilter::kernelDensity(*view, Eigen::Matrix2d::Identity()));
@@ -194,7 +195,7 @@ TYPED_TEST(KernelDensityTest, SampledLogPdfMatchesEstimate) {
 TEST(KernelDensity, SamplesStayNearWeightedParticles) {
   // Only the middle particle has weight, and the kernel is narrow.
   const Eigen::Matrix<double, 2, 3> states{{-10.0, 0.0, 10.0}, {0.0, 5.0, 0.0}};
-  const MutableParticleSet<double, 2> set{states, Eigen::Array3d{-inf, 0.0, -inf}};
+  const MutableParticleSetN<double, 2> set{states, Eigen::Array3d{-inf, 0.0, -inf}};
   const auto view{set.toParticleSet()};
   const auto kde{EigenFilter::kernelDensity(*view, Eigen::Matrix2d::Identity() * 1e-4)};
   std::mt19937_64 rng{19};

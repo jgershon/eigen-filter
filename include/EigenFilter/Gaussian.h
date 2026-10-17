@@ -22,10 +22,10 @@ enum class GaussianError {
   NonFinite,            ///< the covariance's lower triangle contains NaN or infinity
 };
 
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class Gaussian;
 
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class MutableGaussian;
 
 template <typename Source, typename Indices,
@@ -56,9 +56,8 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
   const auto givenSpace{
       projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(source.space(), source.size(), given)};
   auto result{conditionMoments(source.mean(), source.cov(), target, given, values, givenSpace, targetSpace)};
-  return MutableGaussian<typename Source::Scalar, Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime,
-                         std::remove_cvref_t<decltype(targetSpace)>>{targetSpace, std::move(result.mean),
-                                                                     std::move(result.cov)};
+  return MutableGaussian<typename Source::Scalar, std::remove_cvref_t<decltype(targetSpace)>>{
+      targetSpace, std::move(result.mean), std::move(result.cov)};
 }
 
 /** conditionalGaussian() with every entry not in \a givenIndices as the target. */
@@ -92,27 +91,24 @@ template <typename Source, typename GivenIndices, typename Derived>
  * Only the lower triangle of the covariance is read by the factorization.
  * Changing the mean does not invalidate the factorization.
  *
- * \tparam Scalar_   scalar type
- * \tparam Size_     dimension, or \c Eigen::Dynamic
- * \tparam MaxSize_  maximum dimension
- * \tparam Space_    space of the coordinates; Linear by default
+ * \tparam Scalar_  scalar type
+ * \tparam Space_   space of the coordinates, which sets the dimension and the storage
+ *                  bound (see \ref Spaces)
  *
- * \sa class Gaussian, class Moments, MutableGaussianIn
+ * \sa class Gaussian, class Moments, MutableGaussianN
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class MutableGaussian {
-  static_assert(Size_ == Eigen::Dynamic || isValidSize<Space_>(Size_), "the size does not fit the space");
-
  public:
-  using MomentsType = Moments<Scalar_, Size_, MaxSize_>;
+  using MomentsType = Moments<Scalar_, Space_>;
   using Scalar = typename MomentsType::Scalar;
   using Index = typename MomentsType::Index;
   using VectorType = typename MomentsType::VectorType;
   using MatrixType = typename MomentsType::MatrixType;
   using SpaceType = Space_;
-  using GaussianType = Gaussian<Scalar_, Size_, MaxSize_, Space_>;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  using GaussianType = Gaussian<Scalar_, Space_>;
+  static constexpr int SizeAtCompileTime{MomentsType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{MomentsType::MaxSizeAtCompileTime};
   static constexpr bool IsMutable{true};
 
   MutableGaussian() = default;
@@ -201,9 +197,9 @@ class MutableGaussian {
   void resize(Index n) {
     assertUnlocked();
     assertUnborrowed();
+    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
     m_moments.resize(n);
     if constexpr (requires { m_space.resize(n); }) m_space.resize(n);
-    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
     m_factorValid = false;
   }
 
@@ -359,12 +355,12 @@ class MutableGaussian {
  * source MutableGaussian; copies share the lock and the last one to be
  * destroyed releases it. A Gaussian must not outlive its source.
  *
- * \sa class MutableGaussian
+ * \sa class MutableGaussian, GaussianN
  */
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class Gaussian {
  public:
-  using MutableType = MutableGaussian<Scalar_, Size_, MaxSize_, Space_>;
+  using MutableType = MutableGaussian<Scalar_, Space_>;
   using SpaceType = Space_;
   using MomentsType = typename MutableType::MomentsType;
   using Scalar = typename MutableType::Scalar;
@@ -372,8 +368,8 @@ class Gaussian {
   using VectorType = typename MutableType::VectorType;
   using MatrixType = typename MutableType::MatrixType;
   using LLTType = Eigen::LLT<MatrixType>;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr int SizeAtCompileTime{MutableType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{MutableType::MaxSizeAtCompileTime};
   static constexpr bool IsMutable{false};
 
   Gaussian(const Gaussian& other) : m_source{other.m_source} { lock(); }
@@ -535,9 +531,9 @@ class GaussianMarginal {
   using Scalar = typename Source::Scalar;
   using Index = Eigen::Index;
   using SpaceType = SubSpace;
-  static constexpr int SizeAtCompileTime{Selection::size};
-  static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
-  using MutableType = MutableGaussian<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime, SubSpace>;
+  static constexpr int SizeAtCompileTime{spaceSize<SubSpace>};
+  static constexpr int MaxSizeAtCompileTime{spaceMaxSize<SubSpace>};
+  using MutableType = MutableGaussian<Scalar, SubSpace>;
   using MomentsType = typename MutableType::MomentsType;
   using IndexVectorType = typename Selection::type;
 
@@ -596,8 +592,12 @@ template <template <typename, typename, typename> typename Marginal, typename...
 
 }  // namespace internal
 
-/** A MutableGaussian whose size and storage bound come from \a Space. */
-template <typename Scalar, typename Space, int MaxSize = spaceMaxSize<Space>>
-using MutableGaussianIn = MutableGaussian<Scalar, spaceSize<Space>, MaxSize, Space>;
+/** A MutableGaussian of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using MutableGaussianN = MutableGaussian<Scalar, Linear<Size, MaxSize>>;
+
+/** A Gaussian view of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using GaussianN = Gaussian<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter

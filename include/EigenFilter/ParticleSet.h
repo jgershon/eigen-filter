@@ -25,13 +25,13 @@
 
 namespace EigenFilter {
 
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class ParticleSet;
 
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class MutableParticleSet;
 
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class KernelDensity;
 
 template <typename Source, typename Indices,
@@ -92,8 +92,8 @@ template <typename Source, typename BandwidthDerived, typename TargetIndices, ty
   constexpr int GivenMaxSize{Given::MaxRowsAtCompileTime};
   using GivenMatrix = MatrixOf<Scalar, GivenSize, GivenSize, GivenMaxSize, GivenMaxSize>;
   using CrossMatrix = MatrixOf<Scalar, TargetSize, GivenSize, TargetMaxSize, GivenMaxSize>;
-  using GivenStates = SampleSet<Scalar, GivenSize, GivenMaxSize>;
-  using TargetStates = SampleSet<Scalar, TargetSize, TargetMaxSize>;
+  using GivenStates = SampleSetN<Scalar, GivenSize, GivenMaxSize>;
+  using TargetStates = SampleSetN<Scalar, TargetSize, TargetMaxSize>;
   auto targetSpace{projectSpace<TargetSize, TargetMaxSize>(source.space(), source.particleSize(), target)};
   const auto givenSpace{projectSpace<GivenSize, GivenMaxSize>(source.space(), source.particleSize(), given)};
 
@@ -109,7 +109,7 @@ template <typename Source, typename BandwidthDerived, typename TargetIndices, ty
   const Scalar logNormalizer{Scalar(-0.5) * (Scalar(given.size()) * log2Pi + ldlt.vectorD().array().log().sum())};
 
   const TargetStates centers{source.states()(target, Eigen::placeholders::all) - gain * offsets};
-  MutableParticleSet<Scalar, TargetSize, TargetMaxSize, decltype(targetSpace)> result{
+  MutableParticleSet<Scalar, decltype(targetSpace)> result{
       targetSpace, centers,
       Eigen::Array<Scalar, Eigen::Dynamic, 1>{source.logWeights() + logNormalizer - Scalar(0.5) * wsse.transpose()}};
   result.setBandwidth(lowerSymmetricBlock(bandwidth, target, target) - gain * cross.transpose());
@@ -153,33 +153,30 @@ template <typename Source, typename BandwidthDerived, typename GivenIndices, typ
  * change, but adding, removing, resampling, or resizing particles, or moving or
  * destroying this object, is a programmer error.
  *
- * \tparam Scalar_   scalar type
- * \tparam Size_     state dimension, or \c Eigen::Dynamic
- * \tparam MaxSize_  maximum state dimension
- * \tparam Space_    space of the states (see \ref Spaces): states are normalized when
- *                   stored, and moments are tangent-space moments. Linear by default.
+ * \tparam Scalar_  scalar type
+ * \tparam Space_   space of the states, which sets their dimension and storage bound
+ *                  (see \ref Spaces): states are normalized when stored, and moments
+ *                  are tangent-space moments
  *
- * \sa class ParticleSet, class KernelDensity, \ref Resamplers
+ * \sa class ParticleSet, class KernelDensity, MutableParticleSetN, \ref Resamplers
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class MutableParticleSet {
-  static_assert(Size_ == Eigen::Dynamic || isValidSize<Space_>(Size_), "the size does not fit the space");
-
  public:
-  using MomentsType = Moments<Scalar_, Size_, MaxSize_>;
+  using MomentsType = Moments<Scalar_, Space_>;
   using Scalar = typename MomentsType::Scalar;
   using Index = typename MomentsType::Index;
   using VectorType = typename MomentsType::VectorType;
   using MatrixType = typename MomentsType::MatrixType;
   /** Particle states as columns. */
-  using SampleSetType = SampleSet<Scalar_, Size_, MaxSize_>;
+  using SampleSetType = SampleSet<Scalar_, Space_>;
   using ConstStateType = typename SampleSetType::ConstColXpr;
   using WeightArrayType = Eigen::Array<Scalar, Eigen::Dynamic, 1>;
   using SpaceType = Space_;
-  using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_, Space_>;
-  using KernelDensityType = KernelDensity<Scalar_, Size_, MaxSize_, Space_>;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  using ParticleSetType = ParticleSet<Scalar_, Space_>;
+  using KernelDensityType = KernelDensity<Scalar_, Space_>;
+  static constexpr int SizeAtCompileTime{MomentsType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{MomentsType::MaxSizeAtCompileTime};
   static constexpr bool IsMutable{true};
 
   /** Result of removeIf(): the log of the removed fraction of the total weight,
@@ -348,6 +345,7 @@ class MutableParticleSet {
   void resizeParticles(Index n) {
     assertUnlocked();
     assertUnborrowed();
+    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
     m_states.resize(n, size());
     m_bandwidth.reset();
     adoptSize();
@@ -733,7 +731,7 @@ class MutableParticleSet {
     return removed.value();
   }
 
-  SampleSetType m_states{Size_ == Eigen::Dynamic ? 0 : Size_, 0};
+  SampleSetType m_states{SizeAtCompileTime == Eigen::Dynamic ? 0 : SizeAtCompileTime, 0};
   WeightArrayType m_logWeights;
   EIGEN_FILTER_NO_UNIQUE_ADDRESS Space_ m_space;
   std::optional<MatrixType> m_bandwidth;
@@ -756,12 +754,12 @@ class MutableParticleSet {
  * locks the source; copies share the lock and the last one to be destroyed
  * releases it. A ParticleSet must not outlive its source.
  *
- * \sa class MutableParticleSet, class KernelDensity
+ * \sa class MutableParticleSet, class KernelDensity, ParticleSetN
  */
-template <typename Scalar_, int Size_, int MaxSize_, typename Space_>
+template <typename Scalar_, typename Space_>
 class ParticleSet {
  public:
-  using MutableType = MutableParticleSet<Scalar_, Size_, MaxSize_, Space_>;
+  using MutableType = MutableParticleSet<Scalar_, Space_>;
   using SpaceType = Space_;
   using MomentsType = typename MutableType::MomentsType;
   using Scalar = typename MutableType::Scalar;
@@ -771,8 +769,8 @@ class ParticleSet {
   using SampleSetType = typename MutableType::SampleSetType;
   using ConstStateType = typename MutableType::ConstStateType;
   using WeightArrayType = typename MutableType::WeightArrayType;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  static constexpr int SizeAtCompileTime{MutableType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{MutableType::MaxSizeAtCompileTime};
   static constexpr bool IsMutable{false};
 
   ParticleSet(const ParticleSet& other) : m_source{other.m_source} { lock(); }
@@ -907,10 +905,10 @@ class ParticleSetMarginal {
  public:
   using Scalar = typename Source::Scalar;
   using Index = Eigen::Index;
-  static constexpr int SizeAtCompileTime{Selection::size};
-  static constexpr int MaxSizeAtCompileTime{Selection::maxSize};
+  static constexpr int SizeAtCompileTime{spaceSize<SubSpace>};
+  static constexpr int MaxSizeAtCompileTime{spaceMaxSize<SubSpace>};
   using SpaceType = SubSpace;
-  using MutableType = MutableParticleSet<Scalar, SizeAtCompileTime, MaxSizeAtCompileTime, SubSpace>;
+  using MutableType = MutableParticleSet<Scalar, SubSpace>;
   using MatrixType = typename MutableType::MatrixType;
   using WeightArrayType = typename MutableType::WeightArrayType;
   using IndexVectorType = typename Selection::type;
@@ -980,12 +978,20 @@ class ParticleSetMarginal {
  *
  * Near-optimal for roughly Gaussian particle clouds; scale it down for multimodal ones.
  */
-template <typename Scalar, int Size, int MaxSize, typename Space>
-[[nodiscard]] typename ParticleSet<Scalar, Size, MaxSize, Space>::MatrixType silvermanBandwidth(
-    const ParticleSet<Scalar, Size, MaxSize, Space>& particles) {
-  return internal::silvermanBandwidth<typename ParticleSet<Scalar, Size, MaxSize, Space>::MomentsType>(
+template <typename Scalar, typename Space>
+[[nodiscard]] typename ParticleSet<Scalar, Space>::MatrixType silvermanBandwidth(
+    const ParticleSet<Scalar, Space>& particles) {
+  return internal::silvermanBandwidth<typename ParticleSet<Scalar, Space>::MomentsType>(
       particles.space(), particles.states(), particles.logWeights());
 }
+
+/** A MutableParticleSet of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using MutableParticleSetN = MutableParticleSet<Scalar, Linear<Size, MaxSize>>;
+
+/** A ParticleSet view of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using ParticleSetN = ParticleSet<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter
 

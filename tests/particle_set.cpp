@@ -13,6 +13,7 @@
 #include <vector>
 
 using EigenFilter::MutableParticleSet;
+using EigenFilter::MutableParticleSetN;
 using EigenFilter::StratifiedResampler;
 using EigenFilter::WeightError;
 
@@ -21,13 +22,13 @@ namespace {
 constexpr double inf{std::numeric_limits<double>::infinity()};
 
 // Lets std::vector move rather than copy particle sets on reallocation.
-static_assert(std::is_nothrow_move_constructible_v<MutableParticleSet<double, Eigen::Dynamic>>);
-static_assert(std::is_nothrow_move_constructible_v<MutableParticleSet<double, 3>>);
+static_assert(std::is_nothrow_move_constructible_v<MutableParticleSetN<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<MutableParticleSetN<double, 3>>);
 
 // Each config names a MutableParticleSet type and the state dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableParticleSet<Scalar, Size, MaxSize>;
+  using Type = MutableParticleSetN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -112,7 +113,7 @@ TYPED_TEST(ParticleSetTest, ResampleKeepsStatesAndNormalizes) {
 
 namespace {
 
-using MPS2 = MutableParticleSet<double, 2>;
+using MPS2 = MutableParticleSetN<double, 2>;
 
 // A 2-D set with the given weights; particle i is at (i, -i).
 MPS2 makeWeighted(const std::vector<double>& weights) {
@@ -238,7 +239,7 @@ TEST(ParticleSet, NormalizeAndAppend) {
 }
 
 TEST(ParticleSet, ResizeParticlesDynamic) {
-  MutableParticleSet<double, Eigen::Dynamic> set{Eigen::MatrixXd::Zero(2, 3)};
+  MutableParticleSetN<double, Eigen::Dynamic> set{Eigen::MatrixXd::Zero(2, 3)};
   set.resizeParticles(4);
   EXPECT_EQ(set.particleSize(), 4);
   EXPECT_EQ(set.size(), 3);

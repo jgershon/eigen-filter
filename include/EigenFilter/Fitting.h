@@ -45,44 +45,48 @@ struct FitOptions {
   Scalar minLogWeight{Scalar(-20)};
 };
 
-/** Result of fitMixture(). */
-template <typename Scalar, int Size, int MaxSize = Size, typename Space = Linear<Size, MaxSize>>
+/** Result of fitMixture(), in \a Space.
+ *
+ * \sa MixtureFitN
+ */
+template <typename Scalar, typename Space>
 struct MixtureFit {
-  MutableGaussianMixture<Scalar, Size, MaxSize, Space> mixture;  ///< fitted mixture, weights normalized to one
-  Scalar logLikelihood;  ///< weighted log-likelihood of the source under \c mixture
-  int iterations;        ///< E-steps performed
-  bool converged;        ///< whether \c tolerance was reached before \c maxIterations
+  MutableGaussianMixture<Scalar, Space> mixture;  ///< fitted mixture, weights normalized to one
+  Scalar logLikelihood;                           ///< weighted log-likelihood of the source under \c mixture
+  int iterations;                                 ///< E-steps performed
+  bool converged;                                 ///< whether \c tolerance was reached before \c maxIterations
 };
+
+/** MixtureFit of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using MixtureFitN = MixtureFit<Scalar, Linear<Size, MaxSize>>;
 
 namespace internal {
 
 /** Weighted points to fit, each with an optional covariance (a particle has none). */
-template <typename Scalar, int Size, int MaxSize, typename Space>
+template <typename Scalar, typename Space>
 struct FitSource {
-  using MatrixType = typename Moments<Scalar, Size, MaxSize>::MatrixType;
-  SampleSet<Scalar, Size, MaxSize> points;
+  using MatrixType = typename Moments<Scalar, Space>::MatrixType;
+  SampleSet<Scalar, Space> points;
   Eigen::Array<Scalar, Eigen::Dynamic, 1> weights;  ///< normalized linear weights
   std::vector<MatrixType> covs;                     ///< per-point covariances; empty for particles
   std::vector<MatrixType> covFactors;               ///< lower Cholesky factors of \c covs
   Space space;
 };
 
-template <typename Scalar, int Size, int MaxSize, typename Space>
-[[nodiscard]] FitSource<Scalar, Size, MaxSize, Space> fitSource(
-    const ParticleSet<Scalar, Size, MaxSize, Space>& particles) {
+template <typename Scalar, typename Space>
+[[nodiscard]] FitSource<Scalar, Space> fitSource(const ParticleSet<Scalar, Space>& particles) {
   return {particles.states(), particles.normalizedWeights(), {}, {}, particles.space()};
 }
 
-template <typename Scalar, int Size, int MaxSize, typename Space>
-[[nodiscard]] FitSource<Scalar, Size, MaxSize, Space> fitSource(
-    const GaussianMixture<Scalar, Size, MaxSize, Space>& mixture) {
-  using MatrixType = typename FitSource<Scalar, Size, MaxSize, Space>::MatrixType;
-  FitSource<Scalar, Size, MaxSize, Space> source{
-      SampleSet<Scalar, Size, MaxSize>{mixture.componentSize(), mixture.size()},
-      Eigen::Array<Scalar, Eigen::Dynamic, 1>{mixture.size()},
-      {},
-      {},
-      mixture.space()};
+template <typename Scalar, typename Space>
+[[nodiscard]] FitSource<Scalar, Space> fitSource(const GaussianMixture<Scalar, Space>& mixture) {
+  using MatrixType = typename FitSource<Scalar, Space>::MatrixType;
+  FitSource<Scalar, Space> source{SampleSet<Scalar, Space>{mixture.componentSize(), mixture.size()},
+                                  Eigen::Array<Scalar, Eigen::Dynamic, 1>{mixture.size()},
+                                  {},
+                                  {},
+                                  mixture.space()};
   source.covs.reserve(std::size_t(mixture.size()));
   source.covFactors.reserve(std::size_t(mixture.size()));
   Eigen::Index i{0};
@@ -105,17 +109,17 @@ template <typename Scalar, int Size, int MaxSize, typename Space>
  * and the M-step moment-matches. For particles (\f$ S_i = 0 \f$) it is ordinary weighted EM.
  * Residuals are normalized by the source's space and means are tangent-space means.
  */
-template <typename Scalar, int Size, int MaxSize, typename Space>
+template <typename Scalar, typename Space>
 class MixtureFitter {
  public:
-  using MomentsType = Moments<Scalar, Size, MaxSize>;
+  using MomentsType = Moments<Scalar, Space>;
   using VectorType = typename MomentsType::VectorType;
   using MatrixType = typename MomentsType::MatrixType;
-  using Points = SampleSet<Scalar, Size, MaxSize>;
+  using Points = SampleSet<Scalar, Space>;
   using Weights = Eigen::Array<Scalar, Eigen::Dynamic, 1>;
   using Responsibilities = Eigen::Array<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
-  using Source = FitSource<Scalar, Size, MaxSize, Space>;
-  using Result = MixtureFit<Scalar, Size, MaxSize, Space>;
+  using Source = FitSource<Scalar, Space>;
+  using Result = MixtureFit<Scalar, Space>;
 
   MixtureFitter(const Source& source, const FitOptions<Scalar>& options) : m_source{source}, m_options{options} {
     EIGEN_FILTER_ASSERT(options.maxIterations >= 1);
@@ -305,7 +309,7 @@ class MixtureFitter {
   }
 
   [[nodiscard]] Result result(Scalar logLikelihood, int iterations, bool converged) const {
-    MutableGaussianMixture<Scalar, Size, MaxSize, Space> mixture{m_source.space, m_source.points.rows()};
+    MutableGaussianMixture<Scalar, Space> mixture{m_source.space, m_source.points.rows()};
     mixture.reserve(Eigen::Index(m_means.size()));
     for (std::size_t k{0}; k < m_means.size(); ++k) mixture.add(m_logWeights[k], m_means[k], m_covs[k]);
     return {std::move(mixture), logLikelihood, iterations, converged};
@@ -332,12 +336,12 @@ class MixtureFitter {
  *
  * \returns the fit, or FitError::Degenerate if the particles have no spread in some dimension
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] std::expected<MixtureFit<Scalar, Size, MaxSize, Space>, FitError> fitMixture(
-    const ParticleSet<Scalar, Size, MaxSize, Space>& particles, Eigen::Index k, G& rng,
-    const FitOptions<Scalar>& options = {}) {
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
+[[nodiscard]] std::expected<MixtureFit<Scalar, Space>, FitError> fitMixture(const ParticleSet<Scalar, Space>& particles,
+                                                                            Eigen::Index k, G& rng,
+                                                                            const FitOptions<Scalar>& options = {}) {
   const auto source{internal::fitSource(particles)};
-  internal::MixtureFitter<Scalar, Size, MaxSize, Space> fitter{source, options};
+  internal::MixtureFitter<Scalar, Space> fitter{source, options};
   return fitter.run(source.points, source.weights, k, rng);
 }
 
@@ -350,12 +354,11 @@ template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_r
  *
  * \returns the fit, or FitError::Degenerate if the mixture has no spread in some dimension
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] std::expected<MixtureFit<Scalar, Size, MaxSize, Space>, FitError> fitMixture(
-    const GaussianMixture<Scalar, Size, MaxSize, Space>& mixture, Eigen::Index k, G& rng,
-    const FitOptions<Scalar>& options = {}) {
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
+[[nodiscard]] std::expected<MixtureFit<Scalar, Space>, FitError> fitMixture(
+    const GaussianMixture<Scalar, Space>& mixture, Eigen::Index k, G& rng, const FitOptions<Scalar>& options = {}) {
   const auto source{internal::fitSource(mixture)};
-  internal::MixtureFitter<Scalar, Size, MaxSize, Space> fitter{source, options};
+  internal::MixtureFitter<Scalar, Space> fitter{source, options};
   return fitter.run(source.points, source.weights, k, rng);
 }
 
@@ -366,15 +369,14 @@ template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_r
  * Useful when the particles were drawn from \a seedsFrom: its components summarize the
  * particles and are far fewer, so seeding is cheaper and starts EM closer to the answer.
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] std::expected<MixtureFit<Scalar, Size, MaxSize, Space>, FitError> fitMixture(
-    const ParticleSet<Scalar, Size, MaxSize, Space>& particles,
-    const GaussianMixture<Scalar, Size, MaxSize, Space>& seedsFrom, Eigen::Index k, G& rng,
-    const FitOptions<Scalar>& options = {}) {
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
+[[nodiscard]] std::expected<MixtureFit<Scalar, Space>, FitError> fitMixture(
+    const ParticleSet<Scalar, Space>& particles, const GaussianMixture<Scalar, Space>& seedsFrom, Eigen::Index k,
+    G& rng, const FitOptions<Scalar>& options = {}) {
   EIGEN_FILTER_ASSERT(particles.space() == seedsFrom.space() && "the particles and seeds must share a space");
   const auto source{internal::fitSource(particles)};
   const auto seeds{internal::fitSource(seedsFrom)};
-  internal::MixtureFitter<Scalar, Size, MaxSize, Space> fitter{source, options};
+  internal::MixtureFitter<Scalar, Space> fitter{source, options};
   return fitter.run(seeds.points, seeds.weights, k, rng);
 }
 
