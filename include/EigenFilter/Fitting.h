@@ -22,7 +22,7 @@ namespace EigenFilter {
 
 /** Reasons fitMixture() can fail. */
 enum class FitError {
-  Degenerate,  ///< the source has no spread to fit, e.g. every particle has the same state
+  Degenerate,  ///< the source has no spread in some dimension, e.g. every particle has the same state
 };
 
 /** Options for fitMixture(). */
@@ -32,9 +32,11 @@ struct FitOptions {
   int maxIterations{100};
   /** Stop when an iteration improves the weighted log-likelihood by at most this. */
   Scalar tolerance{Scalar(1e-8)};
-  /** Covariance floor, relative to the source's average variance: every component
-   * covariance gets \f$ \epsilon \cdot \mathrm{tr}(\Sigma)/d \cdot I \f$ added. Keeps
-   * components that capture duplicate particles from collapsing.
+  /** Covariance floor, relative to the source's variance in each dimension: every
+   * component covariance gets \f$ \epsilon \Sigma_{ii} \f$ added to its \f$ i \f$-th variance.
+   * Scaling each dimension by its own variance keeps the floor consistent when the
+   * dimensions have different units. Keeps components that capture duplicate particles
+   * from collapsing.
    */
   Scalar regularization{Scalar(1e-6)};
   /** Components whose normalized log-weight falls below this are dropped. */
@@ -134,19 +136,18 @@ class MixtureFitter {
  private:
   /** Factorizes the source's overall covariance, which defines the seeding metric and the floor. */
   [[nodiscard]] bool prepareWhitening() {
-    const Eigen::Index d{m_source.points.rows()};
     const MomentsType moments{weightedMoments<MomentsType>(m_source.points, m_source.weights.log(), Scalar(0))};
     MatrixType total{moments.cov()};
     for (std::size_t i{0}; i < m_source.covs.size(); ++i) total += m_source.weights(Eigen::Index(i)) * m_source.covs[i];
-    const Scalar averageVariance{total.trace() / Scalar(d)};
-    // Identical points leave only rounding noise, of order epsilon² times the second moment.
-    const Scalar averageSecondMoment{averageVariance + moments.mean().squaredNorm() / Scalar(d)};
-    if (!(averageVariance > Eigen::NumTraits<Scalar>::epsilon() * averageSecondMoment) ||
-        !Eigen::numext::isfinite(averageVariance)) {
+    const VectorType variances{total.diagonal()};
+    // A dimension of identical points leaves only rounding noise, of order epsilon² times
+    // its second moment; with no spread there is no scale to fit or to floor against.
+    const auto secondMoments{(variances.array() + moments.mean().array().square()).eval()};
+    if (!(variances.array() > Eigen::NumTraits<Scalar>::epsilon() * secondMoments).all() || !variances.allFinite()) {
       return false;
     }
-    m_floor = m_options.regularization * averageVariance;
-    total.diagonal().array() += m_floor;
+    m_floor = m_options.regularization * variances;
+    total.diagonal() += m_floor;
     m_whitening.compute(total);
     return m_whitening.info() == Eigen::Success;
   }
@@ -220,7 +221,7 @@ class MixtureFitter {
       for (std::size_t i{0}; i < m_source.covs.size(); ++i) {
         if (w(Eigen::Index(i)) > Scalar(0)) moments.cov() += (w(Eigen::Index(i)) / mass) * m_source.covs[i];
       }
-      moments.cov().diagonal().array() += m_floor;
+      moments.cov().diagonal() += m_floor;
       m_logWeights.push_back(Eigen::numext::log(mass));
       m_means.push_back(moments.mean());
       m_covs.push_back(moments.cov());
@@ -295,7 +296,7 @@ class MixtureFitter {
   const Source& m_source;
   FitOptions<Scalar> m_options;
   Eigen::LLT<MatrixType> m_whitening;
-  Scalar m_floor{0};
+  VectorType m_floor;
   std::vector<Scalar> m_logWeights;
   std::vector<VectorType> m_means;
   std::vector<MatrixType> m_covs;
