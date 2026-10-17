@@ -29,9 +29,6 @@ template <typename Scalar_, typename Space_>
 class ParticleSet;
 
 template <typename Scalar_, typename Space_>
-class MutableParticleSet;
-
-template <typename Scalar_, typename Space_>
 class KernelDensity;
 
 template <typename Source, typename Indices,
@@ -41,7 +38,7 @@ template <typename Source, typename Indices,
               internal::IndexedSize<Indices, Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime>::maxSize>>
 class ParticleSetMarginal;
 
-/** Reasons MutableParticleSet::toKernelDensity() can fail: the weights cannot be
+/** Reasons ParticleSet::toDensity() can fail: the weights cannot be
  * normalized, or the bandwidth is not positive definite or not finite.
  */
 using KernelDensityError = std::variant<WeightError, GaussianError>;
@@ -109,7 +106,7 @@ template <typename Source, typename BandwidthDerived, typename TargetIndices, ty
   const Scalar logNormalizer{Scalar(-0.5) * (Scalar(given.size()) * log2Pi + ldlt.vectorD().array().log().sum())};
 
   const TargetStates centers{source.states()(target, Eigen::placeholders::all) - gain * offsets};
-  MutableParticleSet<Scalar, decltype(targetSpace)> result{
+  ParticleSet<Scalar, decltype(targetSpace)> result{
       targetSpace, centers,
       Eigen::Array<Scalar, Eigen::Dynamic, 1>{source.logWeights() + logNormalizer - Scalar(0.5) * wsse.transpose()}};
   result.setBandwidth(lowerSymmetricBlock(bandwidth, target, target) - gain * cross.transpose());
@@ -129,12 +126,14 @@ template <typename Source, typename BandwidthDerived, typename GivenIndices, typ
 
 }  // namespace internal
 
-/** \brief Mutable set of weighted samples that can be viewed as a ParticleSet.
+/** \brief A set of weighted samples: the empirical distribution
+ * \f[ \hat p(x) = \sum_i \hat w_i \, \delta(x - x_i), \qquad \hat w_i = w_i / \textstyle\sum_j w_j. \f]
  *
  * Particle states are the columns of states(); their log-weights are
  * logWeights(). Weights need not be normalized; a log-weight of -inf is a zero
  * weight. Particles are addressed by index. Removal may reorder the remaining
- * particles.
+ * particles. Statistics that need normalized weights, such as moments(), return a
+ * WeightError if the weights cannot be normalized (see logTotalWeight()).
  *
  * A set may carry a kernel bandwidth: the shared covariance \f$ H \f$ of the
  * Gaussian kernels in its kernel density estimate. kdeBandwidth() is the stored
@@ -142,11 +141,12 @@ template <typename Source, typename BandwidthDerived, typename GivenIndices, typ
  * their exact bandwidth this way. A stored bandwidth is kept as the states change,
  * so it can go stale; call clearBandwidth() to return to Silverman's rule.
  *
- * toParticleSet() validates the weights and returns a ParticleSet view, and
- * toKernelDensity() goes straight to a KernelDensity. While any view is alive this
- * object is locked: mutating, moving, or destroying it is a programmer error caught
- * by \c EIGEN_FILTER_ASSERT. It is also locked while forEach() and removeIf() call
- * back into user code.
+ * A set of weighted points has no density of its own, so toDensity() returns its
+ * kernel density estimate: it validates the weights, factorizes a bandwidth, and
+ * returns a KernelDensity. While any KernelDensity is alive this object is locked:
+ * mutating, moving, or destroying it is a programmer error caught by
+ * \c EIGEN_FILTER_ASSERT. It is also locked while forEach() and removeIf() call back
+ * into user code.
  *
  * marginal() returns a read-only view of a subset of the state entries. While any
  * marginal is alive this object is borrowed: states, weights, and bandwidth may
@@ -158,10 +158,10 @@ template <typename Source, typename BandwidthDerived, typename GivenIndices, typ
  *                  (see \ref Spaces): states are normalized when stored, and moments
  *                  are tangent-space moments
  *
- * \sa class ParticleSet, class KernelDensity, MutableParticleSetN, \ref Resamplers
+ * \sa class KernelDensity, ParticleSetN, \ref Resamplers
  */
 template <typename Scalar_, typename Space_>
-class MutableParticleSet {
+class ParticleSet {
  public:
   using MomentsType = Moments<Scalar_, Space_>;
   using Scalar = typename MomentsType::Scalar;
@@ -173,11 +173,10 @@ class MutableParticleSet {
   using ConstStateType = typename SampleSetType::ConstColXpr;
   using WeightArrayType = Eigen::Array<Scalar, Eigen::Dynamic, 1>;
   using SpaceType = Space_;
-  using ParticleSetType = ParticleSet<Scalar_, Space_>;
   using KernelDensityType = KernelDensity<Scalar_, Space_>;
   static constexpr int SizeAtCompileTime{MomentsType::SizeAtCompileTime};
   static constexpr int MaxSizeAtCompileTime{MomentsType::MaxSizeAtCompileTime};
-  static constexpr bool IsMutable{true};
+  static constexpr bool IsOwner{true};
 
   /** Result of removeIf(): the log of the removed fraction of the total weight,
    * or nothing when \a ReturnRemovedWeight is false.
@@ -206,39 +205,36 @@ class MutableParticleSet {
     }
 
    private:
-    friend MutableParticleSet;
+    friend ParticleSet;
 
-    MutableParticle(MutableParticleSet& set, Index index) : m_set{set}, m_index{index} {}
+    MutableParticle(ParticleSet& set, Index index) : m_set{set}, m_index{index} {}
 
-    MutableParticleSet& m_set;
+    ParticleSet& m_set;
     Index m_index;
   };
 
-  MutableParticleSet() = default;
+  ParticleSet() = default;
 
   /** Constructs an empty set whose particles will have dimension \a particleSize. */
-  explicit MutableParticleSet(Index particleSize) : m_states{particleSize, 0} { adoptSize(); }
+  explicit ParticleSet(Index particleSize) : m_states{particleSize, 0} { adoptSize(); }
 
   /** Constructs a set from the columns of \a states, with equal weights summing to one. */
   template <typename StatesDerived>
-  explicit MutableParticleSet(const Eigen::MatrixBase<StatesDerived>& states) {
+  explicit ParticleSet(const Eigen::MatrixBase<StatesDerived>& states) {
     assign(states);
   }
 
   template <typename StatesDerived, typename WeightsDerived>
-  MutableParticleSet(const Eigen::MatrixBase<StatesDerived>& states,
-                     const Eigen::DenseBase<WeightsDerived>& logWeights) {
+  ParticleSet(const Eigen::MatrixBase<StatesDerived>& states, const Eigen::DenseBase<WeightsDerived>& logWeights) {
     assign(states, logWeights);
   }
 
   /** Constructs an empty set in \a space whose particles will have dimension \a particleSize. */
-  MutableParticleSet(Space_ space, Index particleSize) : m_states{particleSize, 0}, m_space{std::move(space)} {
-    checkSpace();
-  }
+  ParticleSet(Space_ space, Index particleSize) : m_states{particleSize, 0}, m_space{std::move(space)} { checkSpace(); }
 
   /** Constructs a set in \a space from the columns of \a states, with equal weights summing to one. */
   template <typename StatesDerived>
-  MutableParticleSet(Space_ space, const Eigen::MatrixBase<StatesDerived>& states)
+  ParticleSet(Space_ space, const Eigen::MatrixBase<StatesDerived>& states)
       : m_states{states},
         m_logWeights{WeightArrayType::Constant(states.cols(), -Eigen::numext::log(Scalar(states.cols())))},
         m_space{std::move(space)} {
@@ -246,15 +242,15 @@ class MutableParticleSet {
   }
 
   template <typename StatesDerived, typename WeightsDerived>
-  MutableParticleSet(Space_ space, const Eigen::MatrixBase<StatesDerived>& states,
-                     const Eigen::DenseBase<WeightsDerived>& logWeights)
+  ParticleSet(Space_ space, const Eigen::MatrixBase<StatesDerived>& states,
+              const Eigen::DenseBase<WeightsDerived>& logWeights)
       : m_states{states}, m_logWeights{logWeights.derived().array()}, m_space{std::move(space)} {
     EIGEN_FILTER_ASSERT(m_logWeights.size() == m_states.cols());
     checkSpace();
   }
 
   /** Copies the particles and any stored bandwidth. The copy starts unlocked and unborrowed. */
-  MutableParticleSet(const MutableParticleSet& other)
+  ParticleSet(const ParticleSet& other)
       : m_states{other.m_states},
         m_logWeights{other.m_logWeights},
         m_space{other.m_space},
@@ -263,7 +259,7 @@ class MutableParticleSet {
   /** Moving a locked or borrowed object is a programmer error; if \c EIGEN_FILTER_ASSERT
    * throws, the exception reaches this \c noexcept boundary and calls \c std::terminate.
    */
-  MutableParticleSet(MutableParticleSet&& other) noexcept
+  ParticleSet(ParticleSet&& other) noexcept
       : m_states{std::move(other.m_states)},
         m_logWeights{std::move(other.m_logWeights)},
         m_space{std::move(other.m_space)},
@@ -275,7 +271,7 @@ class MutableParticleSet {
     other.assertUnborrowed();
   }
 
-  MutableParticleSet& operator=(const MutableParticleSet& other) {
+  ParticleSet& operator=(const ParticleSet& other) {
     assertUnlocked();
     assertUnborrowed();
     m_states = other.m_states;
@@ -285,7 +281,7 @@ class MutableParticleSet {
     return *this;
   }
 
-  MutableParticleSet& operator=(MutableParticleSet&& other) noexcept {
+  ParticleSet& operator=(ParticleSet&& other) noexcept {
     assertUnlocked();
     assertUnborrowed();
     other.assertUnlocked();
@@ -297,7 +293,7 @@ class MutableParticleSet {
     return *this;
   }
 
-  ~MutableParticleSet() {
+  ~ParticleSet() {
     assertUnlocked();
     assertUnborrowed();
   }
@@ -402,7 +398,7 @@ class MutableParticleSet {
   }
 
   /** Appends copies of \a other's particles, which must have the same dimension. */
-  void append(const MutableParticleSet& other) {
+  void append(const ParticleSet& other) {
     assertUnlocked();
     assertUnborrowed();
     EIGEN_FILTER_ASSERT(other.particleSize() == particleSize());
@@ -500,6 +496,35 @@ class MutableParticleSet {
     return {};
   }
 
+  /** \returns the normalized linear weights \f$ \hat w_i \f$, or a WeightError if the
+   *          weights cannot be normalized
+   */
+  [[nodiscard]] std::expected<WeightArrayType, WeightError> normalizedWeights() const {
+    return logTotalWeight().transform([this](Scalar total) { return WeightArrayType{(m_logWeights - total).exp()}; });
+  }
+
+  /** \returns the effective sample size \f$ 1 / \sum_i \hat w_i^2 \f$, between 1 and
+   *          size(), or a WeightError if the weights cannot be normalized
+   */
+  [[nodiscard]] std::expected<Scalar, WeightError> effectiveSampleSize() const {
+    return logTotalWeight().transform(
+        [this](Scalar total) { return internal::effectiveSampleSize(m_logWeights, total); });
+  }
+
+  /** \returns the weighted mean and covariance,
+   * \f$ \mu = \sum_i \hat w_i x_i \f$ and \f$ \Sigma = \sum_i \hat w_i (x_i - \mu)(x_i - \mu)^T \f$,
+   * or a WeightError if the weights cannot be normalized.
+   *
+   * The covariance is the plain weighted (biased) estimate and is exactly symmetric.
+   * It excludes any kernel bandwidth; see KernelDensity::moments() for that. In a
+   * non-linear space these are tangent-space moments.
+   */
+  [[nodiscard]] std::expected<MomentsType, WeightError> moments() const {
+    return logTotalWeight().transform([this](Scalar total) {
+      return internal::weightedMomentsIn<MomentsType>(m_space, m_states, m_logWeights, total);
+    });
+  }
+
   /** Calls \a f on each particle as a \c MutableParticle&.
    *
    * If \a f returns a value, it is a log scale factor added to that particle's
@@ -591,14 +616,14 @@ class MutableParticleSet {
   [[nodiscard]] std::span<const Index> ancestors() const { return m_ancestors; }
 
   /** \returns a read-only view of the state entries \a indices; see
-   * MutableGaussian::marginal() for the index types accepted. While the marginal is
+   * Gaussian::marginal() for the index types accepted. While the marginal is
    * alive this object is borrowed.
    *
    * \sa class ParticleSetMarginal
    */
   template <typename Indices>
-  [[nodiscard]] ParticleSetMarginal<MutableParticleSet, Indices> marginal(const Indices& indices) const {
-    return ParticleSetMarginal<MutableParticleSet, Indices>{*this, indices};
+  [[nodiscard]] ParticleSetMarginal<ParticleSet, Indices> marginal(const Indices& indices) const {
+    return ParticleSetMarginal<ParticleSet, Indices>{*this, indices};
   }
 
   /** marginal() of the subspace named by the tag path \a Path (see idx<>), whose space is
@@ -637,53 +662,66 @@ class MutableParticleSet {
                                           values);
   }
 
-  /** Validates the weights (see logTotalWeight()).
-   *
-   * \returns a ParticleSet view that locks this object for its lifetime, or a WeightError.
-   */
-  [[nodiscard("the ParticleSet view holds the lock; discarding it releases the lock immediately")]]
-  std::expected<ParticleSetType, WeightError> toParticleSet() const {
-    const auto total{logTotalWeight()};
-    if (!total) return std::unexpected{total.error()};
-    m_logTotalWeight = *total;
-    return ParticleSetType{this};
-  }
-
-  /** Validates the weights and builds a kernel density estimate with kdeBandwidth().
+  /** Validates the weights and builds a kernel density estimate with kdeBandwidth():
+   * the stored bandwidth if there is one, otherwise Silverman's rule. A conditional
+   * stores its exact bandwidth, so its density is exact.
    *
    * \returns a KernelDensity that locks this object for its lifetime, or a
    *          KernelDensityError if the weights cannot be normalized or the bandwidth
-   *          is not positive definite.
+   *          is not positive definite (for example, Silverman's rule when every
+   *          particle has the same state).
    */
   [[nodiscard("the KernelDensity holds the lock; discarding it releases the lock immediately")]]
-  std::expected<KernelDensityType, KernelDensityError> toKernelDensity() const {
-    const auto view{toParticleSet()};
-    if (!view) return std::unexpected{KernelDensityError{view.error()}};
-    auto kde{kernelDensity(*view)};
-    if (!kde) return std::unexpected{KernelDensityError{kde.error()}};
-    return std::move(*kde);
+  std::expected<KernelDensityType, KernelDensityError> toDensity() const {
+    const auto total{logTotalWeight()};
+    if (!total) return std::unexpected{KernelDensityError{total.error()}};
+    return kernelDensity(*total, kdeBandwidth());
+  }
+
+  /** Validates the weights and builds a kernel density estimate with bandwidth
+   * \a bandwidth, of which only the lower triangle is read.
+   *
+   * \returns a KernelDensity that locks this object for its lifetime, or a
+   *          KernelDensityError if the weights cannot be normalized or \a bandwidth
+   *          is not positive definite.
+   */
+  template <typename Derived>
+  [[nodiscard("the KernelDensity holds the lock; discarding it releases the lock immediately")]]
+  std::expected<KernelDensityType, KernelDensityError> toDensity(const Eigen::MatrixBase<Derived>& bandwidth) const {
+    const auto total{logTotalWeight()};
+    if (!total) return std::unexpected{KernelDensityError{total.error()}};
+    return kernelDensity(*total, bandwidth);
   }
 
  private:
-  friend ParticleSetType;
   template <typename>
   friend class internal::Borrow;
+  template <typename>
+  friend class internal::Lock;
 
   class ScopedLock {
    public:
-    explicit ScopedLock(const MutableParticleSet& set) : m_set{set} { ++m_set.m_lockCount; }
+    explicit ScopedLock(const ParticleSet& set) : m_set{set} { ++m_set.m_lockCount; }
     ~ScopedLock() { --m_set.m_lockCount; }
     ScopedLock(const ScopedLock&) = delete;
     ScopedLock& operator=(const ScopedLock&) = delete;
 
    private:
-    const MutableParticleSet& m_set;
+    const ParticleSet& m_set;
   };
 
-  void assertUnlocked() const { EIGEN_FILTER_ASSERT(m_lockCount == 0 && "MutableParticleSet is locked"); }
+  void assertUnlocked() const { EIGEN_FILTER_ASSERT(m_lockCount == 0 && "ParticleSet is locked"); }
 
   void assertUnborrowed() const {
-    EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "MutableParticleSet is borrowed by a live marginal");
+    EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "ParticleSet is borrowed by a live marginal");
+  }
+
+  template <typename Derived>
+  [[nodiscard]] std::expected<KernelDensityType, KernelDensityError> kernelDensity(
+      Scalar logTotalWeight, const Eigen::MatrixBase<Derived>& bandwidth) const {
+    auto kde{KernelDensityType::create(*this, logTotalWeight, bandwidth)};
+    if (!kde) return std::unexpected{KernelDensityError{kde.error()}};
+    return std::move(*kde);
   }
 
   void assertIndex([[maybe_unused]] Index i) const {
@@ -739,162 +777,18 @@ class MutableParticleSet {
   SampleSetType m_stateScratch;
   std::vector<Scalar> m_weightScratch;
   std::vector<Index> m_ancestors;
-  // Filled by the const toParticleSet() for use by views.
-  mutable Scalar m_logTotalWeight{};
   mutable int m_lockCount{0};
   mutable int m_borrowCount{0};
 };
 
-/** \brief Read-only view of a MutableParticleSet whose weights have been validated.
+/** \brief Read-only view of a subset of the state entries of a ParticleSet.
  *
- * Represents the empirical distribution
- * \f[ \hat p(x) = \sum_i \hat w_i \, \delta(x - x_i), \qquad \hat w_i = w_i / \textstyle\sum_j w_j. \f]
+ * Obtained from marginal(). It borrows the source. Weights are those of the source.
+ * A stored bandwidth is marginalized too, which keeps the kernel density estimate
+ * exact: the marginal of a KDE is the KDE of the marginal particles with bandwidth
+ * \f$ H_{aa} \f$.
  *
- * Obtained from MutableParticleSet::toParticleSet(). Holding a ParticleSet
- * locks the source; copies share the lock and the last one to be destroyed
- * releases it. A ParticleSet must not outlive its source.
- *
- * \sa class MutableParticleSet, class KernelDensity, ParticleSetN
- */
-template <typename Scalar_, typename Space_>
-class ParticleSet {
- public:
-  using MutableType = MutableParticleSet<Scalar_, Space_>;
-  using SpaceType = Space_;
-  using MomentsType = typename MutableType::MomentsType;
-  using Scalar = typename MutableType::Scalar;
-  using Index = typename MutableType::Index;
-  using VectorType = typename MutableType::VectorType;
-  using MatrixType = typename MutableType::MatrixType;
-  using SampleSetType = typename MutableType::SampleSetType;
-  using ConstStateType = typename MutableType::ConstStateType;
-  using WeightArrayType = typename MutableType::WeightArrayType;
-  static constexpr int SizeAtCompileTime{MutableType::SizeAtCompileTime};
-  static constexpr int MaxSizeAtCompileTime{MutableType::MaxSizeAtCompileTime};
-  static constexpr bool IsMutable{false};
-
-  ParticleSet(const ParticleSet& other) : m_source{other.m_source} { lock(); }
-  ParticleSet(ParticleSet&& other) noexcept : m_source{std::exchange(other.m_source, nullptr)} {}
-
-  ParticleSet& operator=(const ParticleSet& other) {
-    if (this != &other) {
-      unlock();
-      m_source = other.m_source;
-      lock();
-    }
-    return *this;
-  }
-
-  ParticleSet& operator=(ParticleSet&& other) noexcept {
-    if (this != &other) {
-      unlock();
-      m_source = std::exchange(other.m_source, nullptr);
-    }
-    return *this;
-  }
-
-  ~ParticleSet() { unlock(); }
-
-  /** \returns the number of particles */
-  [[nodiscard]] Index size() const { return source().size(); }
-  [[nodiscard]] Index particleSize() const { return source().particleSize(); }
-  [[nodiscard]] const Space_& space() const { return source().space(); }
-  [[nodiscard]] const SampleSetType& states() const { return source().states(); }
-  [[nodiscard]] const WeightArrayType& logWeights() const { return source().logWeights(); }
-  [[nodiscard]] ConstStateType state(Index i) const { return source().state(i); }
-  [[nodiscard]] Scalar logWeight(Index i) const { return source().logWeight(i); }
-  [[nodiscard]] const std::optional<MatrixType>& bandwidth() const { return source().bandwidth(); }
-  [[nodiscard]] MatrixType kdeBandwidth() const { return source().kdeBandwidth(); }
-
-  /** \returns the log of the sum of the (unnormalized) weights */
-  [[nodiscard]] Scalar logTotalWeight() const { return source().m_logTotalWeight; }
-
-  /** \returns an expression for the normalized linear weights \f$ \hat w_i \f$ */
-  [[nodiscard]] auto normalizedWeights() const { return (logWeights() - logTotalWeight()).exp(); }
-
-  /** \returns the effective sample size \f$ 1 / \sum_i \hat w_i^2 \f$, between 1 and size() */
-  [[nodiscard]] Scalar effectiveSampleSize() const {
-    return internal::effectiveSampleSize(logWeights(), logTotalWeight());
-  }
-
-  /** \returns the weighted mean and covariance,
-   * \f$ \mu = \sum_i \hat w_i x_i \f$ and \f$ \Sigma = \sum_i \hat w_i (x_i - \mu)(x_i - \mu)^T \f$.
-   *
-   * The covariance is the plain weighted (biased) estimate and is exactly symmetric.
-   * It excludes any kernel bandwidth; see KernelDensity::moments() for that. In a
-   * non-linear space these are tangent-space moments.
-   */
-  [[nodiscard]] MomentsType moments() const {
-    return internal::weightedMomentsIn<MomentsType>(space(), states(), logWeights(), logTotalWeight());
-  }
-
-  /** \returns a read-only view of the state entries \a indices. It holds a copy of
-   * this view, so the source stays locked while the marginal is alive.
-   */
-  template <typename Indices>
-  [[nodiscard]] ParticleSetMarginal<ParticleSet, Indices> marginal(const Indices& indices) const {
-    return ParticleSetMarginal<ParticleSet, Indices>{*this, indices};
-  }
-
-  /** marginal() of the subspace named by the tag path \a Path; see MutableParticleSet::marginal(). */
-  template <typename... Path>
-    requires(sizeof...(Path) > 0)
-  [[nodiscard]] auto marginal() const {
-    return internal::tagMarginal<ParticleSetMarginal, Path...>(*this);
-  }
-
-  /** \returns a copy of the conditional distribution; see MutableParticleSet::conditional(). */
-  template <typename TargetIndices, typename GivenIndices, typename Derived>
-  [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
-                                 const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalParticles(*this, kdeBandwidth(), target, given, values);
-  }
-
-  /** conditional() with every entry not in \a given as the target. */
-  template <typename GivenIndices, typename Derived>
-  [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalParticles(*this, kdeBandwidth(), given, values);
-  }
-
-  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
-  template <typename... GivenPath, typename Derived>
-    requires(sizeof...(GivenPath) > 0)
-  [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalParticles(*this, kdeBandwidth(), internal::asIndexSet(idx<Space_, GivenPath...>),
-                                          values);
-  }
-
- private:
-  friend MutableType;
-
-  explicit ParticleSet(const MutableType* source) : m_source{source} { lock(); }
-
-  [[nodiscard]] const MutableType& source() const {
-    EIGEN_FILTER_ASSERT(m_source && "use of a moved-from ParticleSet");
-    return *m_source;
-  }
-
-  void lock() {
-    if (m_source) ++m_source->m_lockCount;
-  }
-
-  void unlock() {
-    if (m_source) --m_source->m_lockCount;
-  }
-
-  const MutableType* m_source;
-};
-
-/** \brief Read-only view of a subset of the state entries of a MutableParticleSet
- * or ParticleSet.
- *
- * Obtained from marginal(). From a MutableParticleSet it borrows the source; from a
- * ParticleSet it holds a copy of the view, and so the lock. Weights are those of
- * the source. A stored bandwidth is marginalized too, which keeps the kernel density
- * estimate exact: the marginal of a KDE is the KDE of the marginal particles with
- * bandwidth \f$ H_{aa} \f$.
- *
- * \tparam Source    MutableParticleSet or ParticleSet
+ * \tparam Source    ParticleSet
  * \tparam Indices   the index type passed to marginal()
  * \tparam SubSpace  space of the selected coordinates
  */
@@ -908,9 +802,9 @@ class ParticleSetMarginal {
   static constexpr int SizeAtCompileTime{spaceSize<SubSpace>};
   static constexpr int MaxSizeAtCompileTime{spaceMaxSize<SubSpace>};
   using SpaceType = SubSpace;
-  using MutableType = MutableParticleSet<Scalar, SubSpace>;
-  using MatrixType = typename MutableType::MatrixType;
-  using WeightArrayType = typename MutableType::WeightArrayType;
+  using OwnerType = ParticleSet<Scalar, SubSpace>;
+  using MatrixType = typename OwnerType::MatrixType;
+  using WeightArrayType = typename OwnerType::WeightArrayType;
   using IndexVectorType = typename Selection::type;
 
   /** Selects \a indices, projecting the source's space onto them. */
@@ -954,11 +848,11 @@ class ParticleSetMarginal {
     return MatrixType{internal::lowerSymmetricBlock(*source().bandwidth(), m_indices, m_indices)};
   }
 
-  /** \returns an independent MutableParticleSet holding this marginal, with the
+  /** \returns an independent ParticleSet holding this marginal, with the
    * source's weights and the marginal of any stored bandwidth
    */
-  [[nodiscard]] MutableType copy() const {
-    MutableType result{m_space, states(), logWeights()};
+  [[nodiscard]] OwnerType copy() const {
+    OwnerType result{m_space, states(), logWeights()};
     if (const auto h{bandwidth()}) result.setBandwidth(*h);
     return result;
   }
@@ -974,26 +868,25 @@ class ParticleSetMarginal {
 /** \returns Silverman's rule-of-thumb bandwidth
  * \f[ H = \left(\frac{4}{N_\mathrm{eff}\,(d + 2)}\right)^{2/(d+4)} \Sigma, \f]
  * where \f$ \Sigma \f$ is the particles' weighted covariance, \f$ d \f$ their
- * dimension, and \f$ N_\mathrm{eff} \f$ their effective sample size.
+ * dimension, and \f$ N_\mathrm{eff} \f$ their effective sample size; or a WeightError
+ * if the weights cannot be normalized.
  *
  * Near-optimal for roughly Gaussian particle clouds; scale it down for multimodal ones.
  */
 template <typename Scalar, typename Space>
-[[nodiscard]] typename ParticleSet<Scalar, Space>::MatrixType silvermanBandwidth(
+[[nodiscard]] std::expected<typename ParticleSet<Scalar, Space>::MatrixType, WeightError> silvermanBandwidth(
     const ParticleSet<Scalar, Space>& particles) {
-  return internal::silvermanBandwidth<typename ParticleSet<Scalar, Space>::MomentsType>(
-      particles.space(), particles.states(), particles.logWeights());
+  using MomentsType = typename ParticleSet<Scalar, Space>::MomentsType;
+  return particles.logTotalWeight().transform([&particles](Scalar) {
+    return internal::silvermanBandwidth<MomentsType>(particles.space(), particles.states(), particles.logWeights());
+  });
 }
 
-/** A MutableParticleSet of dimension \a Size in a linear space, with storage bound \a MaxSize. */
-template <typename Scalar, int Size, int MaxSize = Size>
-using MutableParticleSetN = MutableParticleSet<Scalar, Linear<Size, MaxSize>>;
-
-/** A ParticleSet view of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+/** A ParticleSet of dimension \a Size in a linear space, with storage bound \a MaxSize. */
 template <typename Scalar, int Size, int MaxSize = Size>
 using ParticleSetN = ParticleSet<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter
 
-// KernelDensity completes MutableParticleSet::toKernelDensity(); it includes this header first.
+// KernelDensity completes ParticleSet::toDensity(); it includes this header first.
 #include "KernelDensity.h"

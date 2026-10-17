@@ -9,12 +9,12 @@
 #include <optional>
 #include <vector>
 
-using EigenFilter::MutableGaussianN;
+using EigenFilter::GaussianN;
 
 namespace {
 
-using MG4 = MutableGaussianN<double, 4>;
-using MGX = MutableGaussianN<double, Eigen::Dynamic>;
+using MG4 = GaussianN<double, 4>;
+using MGX = GaussianN<double, Eigen::Dynamic>;
 
 Eigen::Matrix4d makeSpd() {
   const Eigen::Matrix4d a{Eigen::Matrix4d::NullaryExpr(
@@ -61,12 +61,12 @@ TEST(GaussianMarginal, CopyIsIndependentAndViewIsLive) {
   MG4 mg{mean4, makeSpd()};
   const auto marginal{mg.marginal(std::array{0, 2})};
   auto copy{marginal.copy()};
-  static_assert(std::is_same_v<decltype(copy), MutableGaussianN<double, 2>>);
+  static_assert(std::is_same_v<decltype(copy), GaussianN<double, 2>>);
 
   mg.setMean(Eigen::Vector4d::Zero());  // values may change while borrowed
   EXPECT_EQ(marginal.mean(), Eigen::Vector2d::Zero());
   EXPECT_EQ(copy.mean(), Eigen::Vector2d(1.0, 3.0));
-  EXPECT_TRUE(copy.toGaussian().has_value());
+  EXPECT_TRUE(copy.toDensity().has_value());
 }
 
 TEST(GaussianMarginal, BorrowReleasedWhenMarginalsDie) {
@@ -81,7 +81,7 @@ TEST(GaussianMarginal, BorrowReleasedWhenMarginalsDie) {
 
 TEST(GaussianMarginal, FromView) {
   const MG4 mg{mean4, makeSpd()};
-  const auto marginal{mg.toGaussian()->marginal(std::array{2})};
+  const auto marginal{mg.toDensity()->marginal(std::array{2})};
   EXPECT_EQ(marginal.mean()(0), 3.0);
   EXPECT_EQ(marginal.copy().cov()(0, 0), makeSpd()(2, 2));
 }
@@ -103,7 +103,7 @@ TEST(GaussianConditional, MatchesFormula) {
   const MG4 mg{mean4, withGarbageUpper(makeSpd())};
   const Eigen::Vector2d v{0.3, -0.7};
   const auto conditional{mg.conditional(std::array{2, 0}, std::array{3, 1}, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianN<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), const GaussianN<double, 2>>);
 
   const auto [mean, cov]{referenceConditional({2, 0}, {3, 1}, v)};
   EXPECT_LT((conditional.mean() - mean).norm(), 1e-12);
@@ -114,7 +114,7 @@ TEST(GaussianConditional, ComplementTarget) {
   const MG4 mg{mean4, makeSpd()};
   const Eigen::Matrix<double, 1, 1> v{0.25};
   const auto conditional{mg.conditional(std::array{1}, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianN<double, 3>>);
+  static_assert(std::is_same_v<decltype(conditional), const GaussianN<double, 3>>);
   const auto explicitTarget{mg.conditional(std::array{0, 2, 3}, std::array{1}, v)};
   EXPECT_EQ(conditional.mean(), explicitTarget.mean());
   EXPECT_EQ(conditional.cov(), explicitTarget.cov());
@@ -125,14 +125,14 @@ TEST(GaussianConditional, ComplementTarget) {
   EXPECT_LT((fromDynamic.mean() - explicitTarget.mean()).norm(), 1e-12);
 }
 
-TEST(GaussianConditional, ViewMatchesMutable) {
+TEST(GaussianConditional, DensityMatchesOwner) {
   const MG4 mg{mean4, makeSpd()};
   const Eigen::Vector2d v{1.0, 2.0};
-  const auto fromMutable{mg.conditional(std::array{0, 1}, std::array{2, 3}, v)};
-  const auto fromView{mg.toGaussian()->conditional(std::array{0, 1}, std::array{2, 3}, v)};
-  EXPECT_EQ(fromMutable.mean(), fromView.mean());
-  EXPECT_EQ(fromMutable.cov(), fromView.cov());
-  EXPECT_TRUE(fromView.toGaussian().has_value());
+  const auto fromGaussian{mg.conditional(std::array{0, 1}, std::array{2, 3}, v)};
+  const auto fromDensity{mg.toDensity()->conditional(std::array{0, 1}, std::array{2, 3}, v)};
+  EXPECT_EQ(fromGaussian.mean(), fromDensity.mean());
+  EXPECT_EQ(fromGaussian.cov(), fromDensity.cov());
+  EXPECT_TRUE(fromDensity.toDensity().has_value());
 }
 
 #if GTEST_HAS_DEATH_TEST && !defined(NDEBUG) && !defined(EIGEN_NO_DEBUG)
@@ -148,8 +148,8 @@ TEST(GaussianMarginalDeathTest, StructuralChangeWhileBorrowed) {
 
 TEST(GaussianMarginalDeathTest, MarginalOfViewKeepsLock) {
   MG4 mg{mean4, makeSpd()};
-  std::optional<EigenFilter::GaussianMarginal<MG4::GaussianType, std::array<int, 1>>> marginal;
-  marginal.emplace(mg.toGaussian()->marginal(std::array{0}));
+  std::optional<EigenFilter::GaussianMarginal<MG4::DensityType, std::array<int, 1>>> marginal;
+  marginal.emplace(mg.toDensity()->marginal(std::array{0}));
   EXPECT_DEATH(mg.setMean(Eigen::Vector4d::Zero()), "locked");
 }
 

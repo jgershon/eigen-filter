@@ -21,7 +21,7 @@ namespace EigenFilter {
  * distribution type, and Moments and SampleSet, is parameterized by a scalar and a
  * space, and takes its size and storage bound from the space; Linear costs nothing.
  * Each also has an Eigen-style alias taking sizes instead, such as
- * <tt>MutableGaussianN<double, 3></tt> for <tt>MutableGaussian<double, Linear<3>></tt>.
+ * <tt>GaussianN<double, 3></tt> for <tt>Gaussian<double, Linear<3>></tt>.
  *
  * A space provides two operations, applied to blocks whose rows are its coordinates
  * and whose columns are samples:

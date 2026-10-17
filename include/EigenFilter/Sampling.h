@@ -50,7 +50,8 @@ template <typename Matrix, std::uniform_random_bit_generator G>
  * \sa drawSamplesWithLogPdf()
  */
 template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] SampleSet<Scalar, Space> drawSamples(const Gaussian<Scalar, Space>& gaussian, Eigen::Index n, G& rng) {
+[[nodiscard]] SampleSet<Scalar, Space> drawSamples(const GaussianDensity<Scalar, Space>& gaussian, Eigen::Index n,
+                                                   G& rng) {
   EIGEN_FILTER_ASSERT(n >= 0);
   using SampleSetType = SampleSet<Scalar, Space>;
   SampleSetType samples{gaussian.llt().matrixL() * internal::standardNormal<SampleSetType>(gaussian.size(), n, rng)};
@@ -64,13 +65,13 @@ template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
  *
  * The log-densities cost almost nothing extra in a linear space: for
  * \f$ x = \mu + L z \f$ the squared Mahalanobis distance is \f$ \|z\|^2 \f$. In other
- * spaces each is Gaussian::logPdf() of the stored sample, so a draw that wraps far
+ * spaces each is GaussianDensity::logPdf() of the stored sample, so a draw that wraps far
  * around a periodic coordinate gets the nearest-image density, matching logPdf().
  *
  * \sa drawSamples()
  */
 template <typename Scalar, typename Space, std::uniform_random_bit_generator G>
-[[nodiscard]] SamplesWithLogPdf<Scalar, Space> drawSamplesWithLogPdf(const Gaussian<Scalar, Space>& gaussian,
+[[nodiscard]] SamplesWithLogPdf<Scalar, Space> drawSamplesWithLogPdf(const GaussianDensity<Scalar, Space>& gaussian,
                                                                      Eigen::Index n, G& rng) {
   EIGEN_FILTER_ASSERT(n >= 0);
   using SampleSetType = SampleSet<Scalar, Space>;

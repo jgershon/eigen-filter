@@ -20,7 +20,7 @@ namespace EigenFilter {
  * nonnegative linear weights with a positive sum; they need not be normalized.
  * Zero-weight indices are never chosen. \a ancestors may be any length.
  *
- * \sa MutableParticleSet::resample()
+ * \sa ParticleSet::resample()
  */
 
 /** Requirements on a resampler for scalar type \a Scalar and random generator \a G. */

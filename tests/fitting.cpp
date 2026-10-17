@@ -5,19 +5,20 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <vector>
 
 using EigenFilter::FitError;
 using EigenFilter::FitOptions;
-using EigenFilter::MutableGaussianMixtureN;
-using EigenFilter::MutableGaussianN;
-using EigenFilter::MutableParticleSetN;
+using EigenFilter::GaussianMixtureN;
+using EigenFilter::GaussianN;
+using EigenFilter::ParticleSetN;
 
 namespace {
 
-using MGM2 = MutableGaussianMixtureN<double, 2>;
-using MPS2 = MutableParticleSetN<double, 2>;
+using MGM2 = GaussianMixtureN<double, 2>;
+using MPS2 = ParticleSetN<double, 2>;
 
 const std::array<Eigen::Vector2d, 3> trueMeans{Eigen::Vector2d{-6.0, 0.0}, Eigen::Vector2d{0.0, 6.0},
                                                Eigen::Vector2d{6.0, 0.0}};
@@ -51,8 +52,8 @@ void expectRecovers(const MGM2& fitted, double meanTolerance, double weightToler
 TEST(FitMixture, RecoversMixtureFromSamples) {
   const auto truth{makeTrueMixture()};
   std::mt19937_64 rng{41};
-  const MPS2 particles{EigenFilter::drawSamples(*truth.toGaussianMixture(), 20000, rng)};
-  const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 3, rng)};
+  const MPS2 particles{EigenFilter::drawSamples(*truth.toDensity(), 20000, rng)};
+  const auto fit{EigenFilter::fitMixture(particles, 3, rng)};
   ASSERT_TRUE(fit.has_value());
   EXPECT_TRUE(fit->converged);
   EXPECT_NEAR(*fit->mixture.logTotalWeight(), 0.0, 1e-12);
@@ -62,16 +63,16 @@ TEST(FitMixture, RecoversMixtureFromSamples) {
 TEST(FitMixture, UsesParticleWeights) {
   // Importance sampling from a broad proposal: the weights alone carry the target's shape.
   const auto truth{makeTrueMixture()};
-  const auto target{truth.toGaussianMixture()};
-  const MutableGaussianN<double, 2> proposal{Eigen::Vector2d{0.0, 2.0}, 49.0 * Eigen::Matrix2d::Identity()};
+  const auto target{truth.toDensity()};
+  const GaussianN<double, 2> proposal{Eigen::Vector2d{0.0, 2.0}, 49.0 * Eigen::Matrix2d::Identity()};
   std::mt19937_64 rng{43};
-  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*proposal.toGaussian(), 60000, rng)};
+  const auto drawn{EigenFilter::drawSamplesWithLogPdf(*proposal.toDensity(), 60000, rng)};
   Eigen::ArrayXd logWeights{drawn.logPdf.size()};
   for (Eigen::Index i{0}; i < logWeights.size(); ++i) {
     logWeights(i) = target->logPdf(drawn.samples.col(i)) - drawn.logPdf(i);
   }
   const MPS2 particles{drawn.samples, logWeights};
-  const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 3, rng)};
+  const auto fit{EigenFilter::fitMixture(particles, 3, rng)};
   ASSERT_TRUE(fit.has_value());
   expectRecovers(fit->mixture, 0.25, 0.04, 0.3);
 }
@@ -84,13 +85,13 @@ TEST(FitMixture, ReducesJitteredMixtureWithoutSampling) {
   MGM2 children;
   children.reserve(999);
   for (std::size_t c{0}; c < 3; ++c) {
-    const MutableGaussianN<double, 2> jitter{trueMeans[c], 0.5 * trueCovs[c]};
-    const auto centers{EigenFilter::drawSamples(*jitter.toGaussian(), 333, rng)};
+    const GaussianN<double, 2> jitter{trueMeans[c], 0.5 * trueCovs[c]};
+    const auto centers{EigenFilter::drawSamples(*jitter.toDensity(), 333, rng)};
     for (Eigen::Index j{0}; j < centers.cols(); ++j) {
       children.add(std::log(trueWeights[c] / 333.0), centers.col(j), 0.5 * trueCovs[c]);
     }
   }
-  const auto source{children.toGaussianMixture()};
+  const auto source{children.toDensity()};
   const auto fit{EigenFilter::fitMixture(*source, 3, rng)};
   ASSERT_TRUE(fit.has_value());
   EXPECT_TRUE(fit->converged);
@@ -98,7 +99,7 @@ TEST(FitMixture, ReducesJitteredMixtureWithoutSampling) {
 
   // Moment matching preserves the overall mean exactly and the covariance up to the floor.
   const auto before{source->moments()};
-  const auto after{fit->mixture.toGaussianMixture()->moments()};
+  const auto after{fit->mixture.toDensity()->moments()};
   EXPECT_LT((after.mean() - before.mean()).norm(), 1e-9);
   EXPECT_LT((after.cov() - before.cov()).norm(), 1e-4);
 }
@@ -110,7 +111,7 @@ TEST(FitMixture, StackedComponentsAreSeededOnce) {
     stacked.add(0.0, trueMeans[2], trueCovs[2]);
   }
   std::mt19937_64 rng{53};
-  const auto fit{EigenFilter::fitMixture(*stacked.toGaussianMixture(), 2, rng)};
+  const auto fit{EigenFilter::fitMixture(*stacked.toDensity(), 2, rng)};
   ASSERT_TRUE(fit.has_value());
   ASSERT_EQ(fit->mixture.size(), 2);
   const double a{fit->mixture.begin()->gaussian.mean()(0)};
@@ -125,7 +126,7 @@ TEST(FitMixture, DuplicateParticlesLimitTheComponentCount) {
   states.rightCols<50>().colwise() = Eigen::Vector2d{6.0, 1.0};
   const MPS2 particles{states};
   std::mt19937_64 rng{59};
-  const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 5, rng)};
+  const auto fit{EigenFilter::fitMixture(particles, 5, rng)};
   ASSERT_TRUE(fit.has_value());
   EXPECT_EQ(fit->mixture.size(), 2);
 }
@@ -134,11 +135,10 @@ TEST(FitMixture, FloorScalesWithEachDimension) {
   // Dimensions a million times apart in scale: each component's floor follows its own dimension.
   const auto truth{makeTrueMixture()};
   std::mt19937_64 rng{83};
-  Eigen::Matrix2Xd samples{EigenFilter::drawSamples(*truth.toGaussianMixture(), 5000, rng)};
+  Eigen::Matrix2Xd samples{EigenFilter::drawSamples(*truth.toDensity(), 5000, rng)};
   samples.row(1) *= 1e-6;
   const MPS2 particles{samples};
-  const auto fit{
-      EigenFilter::fitMixture(*particles.toParticleSet(), 3, rng, FitOptions<double>{.regularization = 1e-2})};
+  const auto fit{EigenFilter::fitMixture(particles, 3, rng, FitOptions<double>{.regularization = 1e-2})};
   ASSERT_TRUE(fit.has_value());
   for (const auto& component : fit->mixture) {
     EXPECT_LT(component.gaussian.cov()(1, 1), 1e-10) << "floor leaked across dimensions";
@@ -150,15 +150,22 @@ TEST(FitMixture, NoSpreadInOneDimensionIsDegenerate) {
   states.row(1).setConstant(3.0);
   const MPS2 particles{states};
   std::mt19937_64 rng{89};
-  EXPECT_EQ(EigenFilter::fitMixture(*particles.toParticleSet(), 2, rng).error(), FitError::Degenerate);
+  EXPECT_EQ(EigenFilter::fitMixture(particles, 2, rng).error(), FitError::Degenerate);
+}
+
+TEST(FitMixture, InvalidWeightsFail) {
+  MPS2 particles{Eigen::Matrix<double, 2, 3>::Random()};
+  particles.scaleWeights(-std::numeric_limits<double>::infinity());
+  std::mt19937_64 rng{83};
+  EXPECT_EQ(EigenFilter::fitMixture(particles, 2, rng).error(), FitError::InvalidWeights);
 }
 
 TEST(FitMixture, SeedsFromAMixture) {
   const auto truth{makeTrueMixture()};
-  const auto view{truth.toGaussianMixture()};
+  const auto view{truth.toDensity()};
   std::mt19937_64 rng{61};
   const MPS2 particles{EigenFilter::drawSamples(*view, 20000, rng)};
-  const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), *view, 3, rng)};
+  const auto fit{EigenFilter::fitMixture(particles, *view, 3, rng)};
   ASSERT_TRUE(fit.has_value());
   EXPECT_TRUE(fit->converged);
   expectRecovers(fit->mixture, 0.1, 0.02, 0.1);
@@ -167,12 +174,11 @@ TEST(FitMixture, SeedsFromAMixture) {
 TEST(FitMixture, LogLikelihoodNeverDecreases) {
   const auto truth{makeTrueMixture()};
   std::mt19937_64 sampler{67};
-  const MPS2 particles{EigenFilter::drawSamples(*truth.toGaussianMixture(), 2000, sampler)};
-  const auto view{particles.toParticleSet()};
+  const MPS2 particles{EigenFilter::drawSamples(*truth.toDensity(), 2000, sampler)};
   double previous{-std::numeric_limits<double>::infinity()};
   for (int iterations{1}; iterations <= 12; ++iterations) {
     std::mt19937_64 rng{71};  // same seeding every time
-    const auto fit{EigenFilter::fitMixture(*view, 4, rng, FitOptions<double>{.maxIterations = iterations})};
+    const auto fit{EigenFilter::fitMixture(particles, 4, rng, FitOptions<double>{.maxIterations = iterations})};
     ASSERT_TRUE(fit.has_value());
     EXPECT_GE(fit->logLikelihood, previous - 1e-9) << "iterations " << iterations;
     previous = fit->logLikelihood;
@@ -182,18 +188,18 @@ TEST(FitMixture, LogLikelihoodNeverDecreases) {
 TEST(FitMixture, DynamicSize) {
   const auto truth{makeTrueMixture()};
   std::mt19937_64 rng{73};
-  const MutableParticleSetN<double, Eigen::Dynamic> particles{
-      Eigen::MatrixXd{EigenFilter::drawSamples(*truth.toGaussianMixture(), 5000, rng)}};
-  const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 3, rng)};
+  const ParticleSetN<double, Eigen::Dynamic> particles{
+      Eigen::MatrixXd{EigenFilter::drawSamples(*truth.toDensity(), 5000, rng)}};
+  const auto fit{EigenFilter::fitMixture(particles, 3, rng)};
   ASSERT_TRUE(fit.has_value());
-  static_assert(std::is_same_v<decltype(fit->mixture), MutableGaussianMixtureN<double, Eigen::Dynamic>>);
+  static_assert(std::is_same_v<decltype(fit->mixture), GaussianMixtureN<double, Eigen::Dynamic>>);
   EXPECT_EQ(fit->mixture.componentSize(), 2);
 }
 
 TEST(FitMixture, DegenerateSourceFails) {
   const MPS2 collapsed{Eigen::Matrix<double, 2, 10>::Ones()};
   std::mt19937_64 rng{79};
-  const auto fit{EigenFilter::fitMixture(*collapsed.toParticleSet(), 2, rng)};
+  const auto fit{EigenFilter::fitMixture(collapsed, 2, rng)};
   ASSERT_FALSE(fit.has_value());
   EXPECT_EQ(fit.error(), FitError::Degenerate);
 }

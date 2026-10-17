@@ -9,7 +9,7 @@ namespace EigenFilter {
 
 /** Reasons a collection of log-weights cannot be normalized.
  *
- * \sa MutableGaussianMixture::logTotalWeight(), MutableParticleSet::logTotalWeight()
+ * \sa GaussianMixture::logTotalWeight(), ParticleSet::logTotalWeight()
  */
 enum class WeightError {
   Empty,      ///< there are no weights

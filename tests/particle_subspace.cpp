@@ -5,19 +5,18 @@
 #include <array>
 #include <cmath>
 #include <memory>
-#include <optional>
 #include <random>
 #include <tuple>
 #include <variant>
 
 using EigenFilter::GaussianError;
 using EigenFilter::KernelDensityError;
-using EigenFilter::MutableParticleSetN;
+using EigenFilter::ParticleSetN;
 using EigenFilter::WeightError;
 
 namespace {
 
-using MPS3 = MutableParticleSetN<double, 3>;
+using MPS3 = ParticleSetN<double, 3>;
 
 // Nine full-rank particles with unnormalized weights 1..9.
 MPS3 make() {
@@ -55,7 +54,7 @@ TEST(ParticleSetMarginal, MarginalizesStoredBandwidth) {
   EXPECT_EQ(*marginal.bandwidth(), expected);
 
   const auto copy{marginal.copy()};
-  static_assert(std::is_same_v<decltype(copy), const MutableParticleSetN<double, 2>>);
+  static_assert(std::is_same_v<decltype(copy), const ParticleSetN<double, 2>>);
   ASSERT_TRUE(copy.bandwidth().has_value());
   EXPECT_EQ(*copy.bandwidth(), expected);
 }
@@ -71,14 +70,13 @@ TEST(ParticleSetMarginal, StatesMayChangeWhileBorrowed) {
 
 TEST(ParticleSetBandwidth, StoredOrSilverman) {
   auto set{make()};
-  const auto silverman{EigenFilter::silvermanBandwidth(*set.toParticleSet())};
+  const auto silverman{*EigenFilter::silvermanBandwidth(set)};
   EXPECT_EQ(set.kdeBandwidth(), silverman);
-  EXPECT_EQ(set.toKernelDensity()->bandwidth(), silverman);
+  EXPECT_EQ(set.toDensity()->bandwidth(), silverman);
 
   set.setBandwidth(bandwidth3);
   EXPECT_EQ(set.kdeBandwidth(), bandwidth3);
-  EXPECT_EQ(set.toKernelDensity()->bandwidth(), bandwidth3);
-  EXPECT_EQ(EigenFilter::kernelDensity(*set.toParticleSet())->bandwidth(), bandwidth3);
+  EXPECT_EQ(set.toDensity()->bandwidth(), bandwidth3);
 
   std::mt19937_64 rng{1};
   ASSERT_TRUE(set.resample(rng).has_value());
@@ -87,16 +85,16 @@ TEST(ParticleSetBandwidth, StoredOrSilverman) {
   set.clearBandwidth();
   EXPECT_FALSE(set.bandwidth().has_value());
 
-  MutableParticleSetN<double, Eigen::Dynamic> dynamic{Eigen::MatrixXd::Random(2, 5)};
+  ParticleSetN<double, Eigen::Dynamic> dynamic{Eigen::MatrixXd::Random(2, 5)};
   dynamic.setBandwidth(Eigen::Matrix2d::Identity());
   dynamic.resizeParticles(3);
   EXPECT_FALSE(dynamic.bandwidth().has_value());
 }
 
 TEST(ParticleSetBandwidth, ToKernelDensityErrors) {
-  EXPECT_EQ(MPS3{}.toKernelDensity().error(), KernelDensityError{WeightError::Empty});
+  EXPECT_EQ(MPS3{}.toDensity().error(), KernelDensityError{WeightError::Empty});
   const MPS3 collapsed{Eigen::Matrix<double, 3, 4>::Ones()};
-  EXPECT_EQ(collapsed.toKernelDensity().error(), KernelDensityError{GaussianError::NotPositiveDefinite});
+  EXPECT_EQ(collapsed.toDensity().error(), KernelDensityError{GaussianError::NotPositiveDefinite});
 }
 
 TEST(KernelDensityConditional, IsJointOverMarginal) {
@@ -106,14 +104,14 @@ TEST(KernelDensityConditional, IsJointOverMarginal) {
   const std::array given{1};
 
   auto conditional{set.conditional(given, v)};
-  static_assert(std::is_same_v<decltype(conditional), MutableParticleSetN<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), ParticleSetN<double, 2>>);
   ASSERT_TRUE(conditional.bandwidth().has_value());
-  const auto conditionalKde{conditional.toKernelDensity()};
+  const auto conditionalKde{conditional.toDensity()};
   ASSERT_TRUE(conditionalKde.has_value());
 
-  const auto joint{set.toKernelDensity()};
+  const auto joint{set.toDensity()};
   const auto marginalOfGiven{set.marginal(given).copy()};
-  const auto marginalKde{marginalOfGiven.toKernelDensity()};
+  const auto marginalKde{marginalOfGiven.toDensity()};
   for (const Eigen::Vector2d a : {Eigen::Vector2d{0.1, -0.2}, Eigen::Vector2d{-0.5, 0.6}, Eigen::Vector2d{0.9, 0.0}}) {
     const Eigen::Vector3d x{a(0), v(0), a(1)};
     EXPECT_NEAR(conditionalKde->logPdf(a), joint->logPdf(x) - marginalKde->logPdf(v), 1e-10);
@@ -125,13 +123,11 @@ TEST(KernelDensityConditional, AllFlavorsAgree) {
   auto set{make()};
   set.setBandwidth(bandwidth3);
   const Eigen::Vector2d v{0.2, -0.3};
-  const auto fromMutable{set.conditional(std::array{0}, std::array{1, 2}, v)};
-  const auto fromView{set.toParticleSet()->conditional(std::array{0}, std::array{1, 2}, v)};
-  const auto fromKde{set.toKernelDensity()->conditional(std::array{0}, std::array{1, 2}, v)};
-  EXPECT_EQ(fromMutable.states(), fromView.states());
-  EXPECT_EQ(fromMutable.states(), fromKde.states());
-  EXPECT_TRUE((fromMutable.logWeights() == fromKde.logWeights()).all());
-  EXPECT_EQ(*fromMutable.bandwidth(), *fromKde.bandwidth());
+  const auto fromSet{set.conditional(std::array{0}, std::array{1, 2}, v)};
+  const auto fromKde{set.toDensity()->conditional(std::array{0}, std::array{1, 2}, v)};
+  EXPECT_EQ(fromSet.states(), fromKde.states());
+  EXPECT_TRUE((fromSet.logWeights() == fromKde.logWeights()).all());
+  EXPECT_EQ(*fromSet.bandwidth(), *fromKde.bandwidth());
 }
 
 TEST(KernelDensityConditional, SilvermanWhenNoBandwidthStored) {
@@ -155,13 +151,6 @@ TEST(ParticleSetMarginalDeathTest, StructuralChangeWhileBorrowed) {
   EXPECT_DEATH(set->clear(), "borrowed");
   EXPECT_DEATH({ auto stolen{std::move(*set)}; }, "borrowed");
   EXPECT_DEATH(set.reset(), "borrowed");
-}
-
-TEST(ParticleSetMarginalDeathTest, MarginalOfViewKeepsLock) {
-  auto set{make()};
-  std::optional<EigenFilter::ParticleSetMarginal<MPS3::ParticleSetType, std::array<int, 1>>> marginal;
-  marginal.emplace(set.toParticleSet()->marginal(std::array{0}));
-  EXPECT_DEATH(set.setBandwidth(bandwidth3), "locked");
 }
 
 #endif

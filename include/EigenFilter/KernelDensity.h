@@ -8,11 +8,13 @@
 #include <vector>
 
 #include "Gaussian.h"
+#include "Indexing.h"
 #include "Macros.h"
 #include "ParticleSet.h"
 #include "Resampling.h"
 #include "SampleSet.h"
 #include "Sampling.h"
+#include "Statistics.h"
 #include "Weights.h"
 
 namespace EigenFilter {
@@ -25,10 +27,11 @@ namespace EigenFilter {
  * and \f$ H \f$ the bandwidth (kernel covariance), which is factorized once and
  * shared by every kernel.
  *
- * Created by kernelDensity(). Holds a copy of the ParticleSet view, so the
- * source MutableParticleSet stays locked for the lifetime of the estimate.
+ * Created by ParticleSet::toDensity(). Holding a KernelDensity locks the
+ * source set; copies share the lock and the last one to be destroyed releases it. A
+ * KernelDensity must not outlive its source.
  *
- * \sa kernelDensity(), silvermanBandwidth(), class ParticleSet, KernelDensityN
+ * \sa ParticleSet::toDensity(), silvermanBandwidth(), KernelDensityN
  */
 template <typename Scalar_, typename Space_>
 class KernelDensity {
@@ -38,7 +41,7 @@ class KernelDensity {
   static constexpr int SizeAtCompileTime{ParticleSetType::SizeAtCompileTime};
   static constexpr int MaxSizeAtCompileTime{ParticleSetType::MaxSizeAtCompileTime};
   /** The zero-mean kernel, in the linear tangent space of \a Space_. */
-  using KernelType = MutableGaussianN<Scalar_, SizeAtCompileTime, MaxSizeAtCompileTime>;
+  using KernelType = GaussianN<Scalar_, SizeAtCompileTime, MaxSizeAtCompileTime>;
   using MomentsType = typename ParticleSetType::MomentsType;
   using Scalar = typename ParticleSetType::Scalar;
   using Index = typename ParticleSetType::Index;
@@ -46,35 +49,29 @@ class KernelDensity {
   using MatrixType = typename ParticleSetType::MatrixType;
   using SampleSetType = typename ParticleSetType::SampleSetType;
 
-  /** \returns a kernel density estimate with bandwidth \a bandwidth, or a
-   *          GaussianError if \a bandwidth is not positive definite or not finite.
-   *          Only the lower triangle of \a bandwidth is read.
-   */
-  template <typename Derived>
-  [[nodiscard]] static std::expected<KernelDensity, GaussianError> create(const ParticleSetType& particles,
-                                                                          const Eigen::MatrixBase<Derived>& bandwidth) {
-    KernelType kernel{VectorType::Zero(particles.particleSize()), bandwidth};
-    if (auto result{kernel.factorize()}; !result) return std::unexpected{result.error()};
-    return KernelDensity{particles, std::move(kernel)};
-  }
-
   /** \returns the number of particles */
-  [[nodiscard]] Index size() const { return m_particles.size(); }
-  [[nodiscard]] Index particleSize() const { return m_particles.particleSize(); }
-  [[nodiscard]] const Space_& space() const { return m_particles.space(); }
-  [[nodiscard]] const ParticleSetType& particles() const { return m_particles; }
+  [[nodiscard]] Index size() const { return particles().size(); }
+  [[nodiscard]] Index particleSize() const { return particles().particleSize(); }
+  [[nodiscard]] const Space_& space() const { return particles().space(); }
+
+  /** \returns the particles, which stay locked while this estimate is alive */
+  [[nodiscard]] const ParticleSetType& particles() const { return m_particles.get(); }
+
+  /** \returns the log of the sum of the (unnormalized) particle weights */
+  [[nodiscard]] Scalar logTotalWeight() const { return m_logTotalWeight; }
 
   /** \returns the kernel covariance \f$ H \f$ */
   [[nodiscard]] const MatrixType& bandwidth() const { return m_kernel.cov(); }
 
   /** \returns a view of the zero-mean kernel \f$ \mathcal{N}(0, H) \f$. It must not outlive this estimate. */
-  [[nodiscard]] typename KernelType::GaussianType kernel() const { return *m_kernel.toGaussian(); }
+  [[nodiscard]] typename KernelType::DensityType kernel() const { return *m_kernel.toDensity(); }
 
   /** \returns the mean and covariance of the estimate: the particles' mean, and
    * their weighted covariance plus \f$ H \f$.
    */
   [[nodiscard]] MomentsType moments() const {
-    MomentsType result{m_particles.moments()};
+    MomentsType result{internal::weightedMomentsIn<MomentsType>(space(), particles().states(), particles().logWeights(),
+                                                                m_logTotalWeight)};
     result.cov() += m_kernel.cov().template selfadjointView<Eigen::Lower>().toDenseMatrix();
     return result;
   }
@@ -90,14 +87,14 @@ class KernelDensity {
     static_assert(Derived::IsVectorAtCompileTime, "logPdf() expects a vector");
     EIGEN_FILTER_ASSERT(x.size() == particleSize());
     const auto kernel{this->kernel()};
-    SampleSetType residuals{m_particles.states().colwise() - x.derived()};
+    SampleSetType residuals{particles().states().colwise() - x.derived()};
     space().normalizeDifferences(residuals);
     kernel.llt().matrixL().solveInPlace(residuals);
     internal::LogSumExp<Scalar> sum;
     for (Index i{0}; i < size(); ++i) {
-      sum.add(m_particles.logWeight(i) - Scalar(0.5) * residuals.col(i).squaredNorm());
+      sum.add(particles().logWeight(i) - Scalar(0.5) * residuals.col(i).squaredNorm());
     }
-    return sum.value() - m_particles.logTotalWeight() + kernel.logPeak();
+    return sum.value() - m_logTotalWeight + kernel.logPeak();
   }
 
   /** \returns the density \f$ \hat p(x) \f$ at \a x
@@ -112,7 +109,7 @@ class KernelDensity {
   }
 
   /** \returns a copy of the distribution of the entries \a target given that the
-   * entries \a given equal \a values, as a MutableParticleSet storing the exact
+   * entries \a given equal \a values, as a ParticleSet storing the exact
    * conditional bandwidth.
    *
    * The conditional of a Gaussian KDE is again a Gaussian KDE: each center becomes
@@ -124,42 +121,38 @@ class KernelDensity {
   template <typename TargetIndices, typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const TargetIndices& target, const GivenIndices& given,
                                  const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalParticles(m_particles, bandwidth(), target, given, values);
+    return internal::conditionalParticles(particles(), bandwidth(), target, given, values);
   }
 
   /** conditional() with every entry not in \a given as the target. */
   template <typename GivenIndices, typename Derived>
   [[nodiscard]] auto conditional(const GivenIndices& given, const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalParticles(m_particles, bandwidth(), given, values);
+    return internal::conditionalParticles(particles(), bandwidth(), given, values);
   }
 
  private:
-  KernelDensity(const ParticleSetType& particles, KernelType kernel)
-      : m_particles{particles}, m_kernel{std::move(kernel)} {}
+  friend ParticleSetType;
 
-  ParticleSetType m_particles;
+  /** \returns an estimate over \a particles, whose weights total \f$ e^{\mathrm{logTotalWeight}} \f$,
+   *          or a GaussianError if \a bandwidth is not positive definite or not finite.
+   *          Only the lower triangle of \a bandwidth is read.
+   */
+  template <typename Derived>
+  [[nodiscard]] static std::expected<KernelDensity, GaussianError> create(const ParticleSetType& particles,
+                                                                          Scalar logTotalWeight,
+                                                                          const Eigen::MatrixBase<Derived>& bandwidth) {
+    KernelType kernel{VectorType::Zero(particles.particleSize()), bandwidth};
+    if (auto result{kernel.factorize()}; !result) return std::unexpected{result.error()};
+    return KernelDensity{particles, logTotalWeight, std::move(kernel)};
+  }
+
+  KernelDensity(const ParticleSetType& particles, Scalar logTotalWeight, KernelType kernel)
+      : m_particles{particles}, m_logTotalWeight{logTotalWeight}, m_kernel{std::move(kernel)} {}
+
+  internal::Lock<ParticleSetType> m_particles;
+  Scalar m_logTotalWeight;
   KernelType m_kernel;
 };
-
-/** \returns a kernel density estimate over \a particles with bandwidth \a bandwidth,
- *          or a GaussianError if \a bandwidth is not positive definite or not finite.
- */
-template <typename Scalar, typename Space, typename Derived>
-[[nodiscard]] std::expected<KernelDensity<Scalar, Space>, GaussianError> kernelDensity(
-    const ParticleSet<Scalar, Space>& particles, const Eigen::MatrixBase<Derived>& bandwidth) {
-  return KernelDensity<Scalar, Space>::create(particles, bandwidth);
-}
-
-/** \returns a kernel density estimate over \a particles with their kdeBandwidth(): the
- *          stored bandwidth if there is one, otherwise silvermanBandwidth(). Fails
- *          with a GaussianError if that bandwidth is not positive definite (for
- *          example, Silverman's rule when every particle has the same state).
- */
-template <typename Scalar, typename Space>
-[[nodiscard]] std::expected<KernelDensity<Scalar, Space>, GaussianError> kernelDensity(
-    const ParticleSet<Scalar, Space>& particles) {
-  return kernelDensity(particles, particles.kdeBandwidth());
-}
 
 /** \returns \a n draws from \a kde, one per column.
  *
@@ -180,7 +173,7 @@ template <typename Scalar, typename Space, std::uniform_random_bit_generator G, 
   const auto& particles{kde.particles()};
   std::vector<Scalar> weights(std::size_t(particles.size()));
   for (Eigen::Index i{0}; i < particles.size(); ++i) {
-    weights[std::size_t(i)] = Eigen::numext::exp(particles.logWeight(i) - particles.logTotalWeight());
+    weights[std::size_t(i)] = Eigen::numext::exp(particles.logWeight(i) - kde.logTotalWeight());
   }
   std::vector<Eigen::Index> ancestors(static_cast<std::size_t>(n));
   resampler(std::span<const Scalar>{weights}, std::span<Eigen::Index>{ancestors}, rng);

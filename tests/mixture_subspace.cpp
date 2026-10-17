@@ -8,11 +8,11 @@
 #include <optional>
 #include <tuple>
 
-using EigenFilter::MutableGaussianMixtureN;
+using EigenFilter::GaussianMixtureN;
 
 namespace {
 
-using MGM4 = MutableGaussianMixtureN<double, 4>;
+using MGM4 = GaussianMixtureN<double, 4>;
 
 Eigen::Matrix4d makeSpd(double phase) {
   const Eigen::Matrix4d a{Eigen::Matrix4d::NullaryExpr(
@@ -51,9 +51,9 @@ TEST(GaussianMixtureMarginal, MarginalizesEveryComponent) {
   }
 
   auto copy{marginal.copy()};
-  static_assert(std::is_same_v<decltype(copy), MutableGaussianMixtureN<double, 2>>);
+  static_assert(std::is_same_v<decltype(copy), GaussianMixtureN<double, 2>>);
   EXPECT_EQ(copy.size(), 3);
-  EXPECT_TRUE(copy.toGaussianMixture().has_value());
+  EXPECT_TRUE(copy.toDensity().has_value());
 }
 
 TEST(GaussianMixtureMarginal, ValuesMayChangeWhileBorrowed) {
@@ -71,14 +71,14 @@ TEST(GaussianMixtureConditional, ConditionsEachComponentAndReweights) {
   const std::array target{2, 0};
   const std::array given{1, 3};
   const auto conditional{mixture.conditional(target, given, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianMixtureN<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), const GaussianMixtureN<double, 2>>);
   ASSERT_EQ(conditional.size(), 3);
 
   for (Eigen::Index i{0}; i < conditional.size(); ++i) {
     const auto& source{*(mixture.begin() + i)};
     const auto& result{*(conditional.begin() + i)};
     const auto expected{source.gaussian.conditional(target, given, v)};
-    const double logLikelihood{source.gaussian.marginal(given).copy().toGaussian()->logPdf(v)};
+    const double logLikelihood{source.gaussian.marginal(given).copy().toDensity()->logPdf(v)};
     EXPECT_LT((result.gaussian.mean() - expected.mean()).norm(), 1e-12);
     EXPECT_LT((result.gaussian.cov() - expected.cov()).norm(), 1e-12);
     EXPECT_NEAR(result.logWeight, source.logWeight + logLikelihood, 1e-12);
@@ -89,22 +89,22 @@ TEST(GaussianMixtureConditional, TotalWeightIsMarginalLikelihood) {
   const auto mixture{make()};
   const Eigen::Vector2d v{0.4, -1.1};
   const auto conditional{mixture.conditional(std::array{1, 3}, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianMixtureN<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), const GaussianMixtureN<double, 2>>);
 
   const auto marginalAtGiven{mixture.marginal(std::array{1, 3}).copy()};
-  const double expected{*mixture.logTotalWeight() + marginalAtGiven.toGaussianMixture()->logPdf(v)};
+  const double expected{*mixture.logTotalWeight() + marginalAtGiven.toDensity()->logPdf(v)};
   EXPECT_NEAR(*conditional.logTotalWeight(), expected, 1e-12);
 }
 
-TEST(GaussianMixtureConditional, ViewMatchesMutable) {
+TEST(GaussianMixtureConditional, DensityMatchesOwner) {
   const auto mixture{make()};
   const Eigen::Matrix<double, 1, 1> v{0.2};
-  const auto fromMutable{mixture.conditional(std::array{2}, v)};
-  const auto fromView{mixture.toGaussianMixture()->conditional(std::array{2}, v)};
-  ASSERT_EQ(fromMutable.size(), fromView.size());
-  for (Eigen::Index i{0}; i < fromMutable.size(); ++i) {
-    EXPECT_EQ((fromMutable.begin() + i)->logWeight, (fromView.begin() + i)->logWeight);
-    EXPECT_EQ((fromMutable.begin() + i)->gaussian.mean(), (fromView.begin() + i)->gaussian.mean());
+  const auto fromMixture{mixture.conditional(std::array{2}, v)};
+  const auto fromDensity{mixture.toDensity()->conditional(std::array{2}, v)};
+  ASSERT_EQ(fromMixture.size(), fromDensity.size());
+  for (Eigen::Index i{0}; i < fromMixture.size(); ++i) {
+    EXPECT_EQ((fromMixture.begin() + i)->logWeight, (fromDensity.begin() + i)->logWeight);
+    EXPECT_EQ((fromMixture.begin() + i)->gaussian.mean(), (fromDensity.begin() + i)->gaussian.mean());
   }
 }
 
@@ -123,8 +123,8 @@ TEST(GaussianMixtureMarginalDeathTest, StructuralChangeWhileBorrowed) {
 
 TEST(GaussianMixtureMarginalDeathTest, MarginalOfViewKeepsLock) {
   auto mixture{make()};
-  std::optional<EigenFilter::GaussianMixtureMarginal<MGM4::GaussianMixtureType, std::array<int, 1>>> marginal;
-  marginal.emplace(mixture.toGaussianMixture()->marginal(std::array{0}));
+  std::optional<EigenFilter::GaussianMixtureMarginal<MGM4::DensityType, std::array<int, 1>>> marginal;
+  marginal.emplace(mixture.toDensity()->marginal(std::array{0}));
   EXPECT_DEATH(mixture.scaleWeights(1.0), "locked");
 }
 

@@ -10,10 +10,11 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
-using EigenFilter::MutableParticleSet;
-using EigenFilter::MutableParticleSetN;
+using EigenFilter::ParticleSet;
+using EigenFilter::ParticleSetN;
 using EigenFilter::StratifiedResampler;
 using EigenFilter::WeightError;
 
@@ -22,13 +23,13 @@ namespace {
 constexpr double inf{std::numeric_limits<double>::infinity()};
 
 // Lets std::vector move rather than copy particle sets on reallocation.
-static_assert(std::is_nothrow_move_constructible_v<MutableParticleSetN<double, Eigen::Dynamic>>);
-static_assert(std::is_nothrow_move_constructible_v<MutableParticleSetN<double, 3>>);
+static_assert(std::is_nothrow_move_constructible_v<ParticleSetN<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<ParticleSetN<double, 3>>);
 
-// Each config names a MutableParticleSet type and the state dimension to test it at.
+// Each config names a ParticleSet type and the state dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableParticleSetN<Scalar, Size, MaxSize>;
+  using Type = ParticleSetN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -67,8 +68,8 @@ TYPED_TEST_SUITE(ParticleSetTest, Configs);
 
 TYPED_TEST(ParticleSetTest, MomentsMatchReference) {
   const auto set{this->make()};
-  const auto view{set.toParticleSet()};
-  ASSERT_TRUE(view.has_value());
+  const auto moments{set.moments()};
+  ASSERT_TRUE(moments.has_value());
 
   const Eigen::MatrixXd x{set.states().template cast<double>()};
   const Eigen::VectorXd w{set.logWeights().template cast<double>().exp().matrix()};
@@ -77,22 +78,21 @@ TYPED_TEST(ParticleSetTest, MomentsMatchReference) {
   Eigen::MatrixXd cov{Eigen::MatrixXd::Zero(this->n, this->n)};
   for (Eigen::Index j{0}; j < x.cols(); ++j) cov += wn(j) * (x.col(j) - mean) * (x.col(j) - mean).transpose();
 
-  const auto moments{view->moments()};
-  EXPECT_LT((moments.mean().template cast<double>() - mean).norm(), this->tolerance() * 10);
-  EXPECT_LT((moments.cov().template cast<double>() - cov).norm(), this->tolerance() * 10);
-  EXPECT_EQ(moments.cov(), moments.cov().transpose());
-  EXPECT_NEAR(view->logTotalWeight(), std::log(28.0), this->tolerance() * 10);
+  EXPECT_LT((moments->mean().template cast<double>() - mean).norm(), this->tolerance() * 10);
+  EXPECT_LT((moments->cov().template cast<double>() - cov).norm(), this->tolerance() * 10);
+  EXPECT_EQ(moments->cov(), moments->cov().transpose());
+  EXPECT_NEAR(*set.logTotalWeight(), std::log(28.0), this->tolerance() * 10);
 }
 
 TYPED_TEST(ParticleSetTest, EffectiveSampleSize) {
   using Scalar = typename TestFixture::Scalar;
   auto set{this->make()};
   set.setLogWeights(TestFixture::WeightArrayType::Constant(this->count, Scalar(3)));
-  EXPECT_NEAR(set.toParticleSet()->effectiveSampleSize(), Scalar(this->count), this->tolerance() * 10);
+  EXPECT_NEAR(*set.effectiveSampleSize(), Scalar(this->count), this->tolerance() * 10);
 
   set.setLogWeights(TestFixture::WeightArrayType::Constant(this->count, -Eigen::NumTraits<Scalar>::infinity()));
   set.setLogWeight(2, Scalar(0));
-  EXPECT_EQ(set.toParticleSet()->effectiveSampleSize(), Scalar(1));
+  EXPECT_EQ(*set.effectiveSampleSize(), Scalar(1));
 }
 
 TYPED_TEST(ParticleSetTest, ResampleKeepsStatesAndNormalizes) {
@@ -113,7 +113,7 @@ TYPED_TEST(ParticleSetTest, ResampleKeepsStatesAndNormalizes) {
 
 namespace {
 
-using MPS2 = MutableParticleSetN<double, 2>;
+using MPS2 = ParticleSetN<double, 2>;
 
 // A 2-D set with the given weights; particle i is at (i, -i).
 MPS2 makeWeighted(const std::vector<double>& weights) {
@@ -139,17 +139,30 @@ TEST(ParticleSet, ConstructFromStatesHasEqualWeights) {
   expectWeights(set, {0.25, 0.25, 0.25, 0.25});
 }
 
+TEST(ParticleSet, NormalizedWeights) {
+  const auto set{makeWeighted({1.0, 3.0})};
+  const auto weights{set.normalizedWeights()};
+  ASSERT_TRUE(weights.has_value());
+  EXPECT_NEAR((*weights)(0), 0.25, 1e-15);
+  EXPECT_NEAR((*weights)(1), 0.75, 1e-15);
+}
+
 TEST(ParticleSet, WeightErrors) {
-  EXPECT_EQ(MPS2{}.toParticleSet().error(), WeightError::Empty);
+  const MPS2 empty;
+  EXPECT_EQ(empty.moments().error(), WeightError::Empty);
+  EXPECT_EQ(empty.effectiveSampleSize().error(), WeightError::Empty);
+  EXPECT_EQ(empty.normalizedWeights().error(), WeightError::Empty);
+  EXPECT_EQ(EigenFilter::silvermanBandwidth(empty).error(), WeightError::Empty);
+  EXPECT_EQ(std::get<WeightError>(empty.toDensity().error()), WeightError::Empty);
 
   auto set{makeWeighted({1.0, 1.0})};
   set.scaleWeights(-inf);
-  EXPECT_EQ(set.toParticleSet().error(), WeightError::ZeroSum);
+  EXPECT_EQ(set.moments().error(), WeightError::ZeroSum);
 
   set.setLogWeight(0, std::numeric_limits<double>::quiet_NaN());
-  EXPECT_EQ(set.toParticleSet().error(), WeightError::NonFinite);
+  EXPECT_EQ(set.moments().error(), WeightError::NonFinite);
   set.setLogWeight(0, inf);
-  EXPECT_EQ(set.toParticleSet().error(), WeightError::NonFinite);
+  EXPECT_EQ(set.moments().error(), WeightError::NonFinite);
 }
 
 TEST(ParticleSet, ResampleFailureLeavesSetUnchanged) {
@@ -239,20 +252,20 @@ TEST(ParticleSet, NormalizeAndAppend) {
 }
 
 TEST(ParticleSet, ResizeParticlesDynamic) {
-  MutableParticleSetN<double, Eigen::Dynamic> set{Eigen::MatrixXd::Zero(2, 3)};
+  ParticleSetN<double, Eigen::Dynamic> set{Eigen::MatrixXd::Zero(2, 3)};
   set.resizeParticles(4);
   EXPECT_EQ(set.particleSize(), 4);
   EXPECT_EQ(set.size(), 3);
   set.setStates(Eigen::MatrixXd::Ones(4, 3));
-  EXPECT_EQ(set.toParticleSet()->moments().mean(), Eigen::Vector4d::Ones());
+  EXPECT_EQ(set.moments()->mean(), Eigen::Vector4d::Ones());
 }
 
-TEST(ParticleSet, LockReleasedWhenViewsDie) {
+TEST(ParticleSet, LockReleasedWhenKernelDensitiesDie) {
   auto set{makeWeighted({1.0, 2.0})};
   {
-    auto view{set.toParticleSet()};
-    auto copy{*view};
-    auto moved{std::move(*view)};
+    auto kde{set.toDensity(Eigen::Matrix2d::Identity())};
+    auto copy{*kde};
+    auto moved{std::move(*kde)};
   }
   set.scaleWeights(1.0);  // would assert if any lock leaked
   set.forEach([](auto&) {});
@@ -263,7 +276,7 @@ TEST(ParticleSet, LockReleasedWhenViewsDie) {
 
 TEST(ParticleSetDeathTest, MutateWhileLocked) {
   auto set{makeWeighted({1.0, 2.0})};
-  const auto view{set.toParticleSet()};
+  const auto kde{set.toDensity(Eigen::Matrix2d::Identity())};
   std::mt19937_64 rng{1};
   EXPECT_DEATH(set.add(0.0, Eigen::Vector2d::Zero()), "locked");
   EXPECT_DEATH(set.remove(0), "locked");
@@ -281,7 +294,7 @@ TEST(ParticleSetDeathTest, MutateSetInsideForEach) {
 
 TEST(ParticleSetDeathTest, MoveWhileLocked) {
   auto set{makeWeighted({1.0, 2.0})};
-  const auto view{set.toParticleSet()};
+  const auto kde{set.toDensity(Eigen::Matrix2d::Identity())};
   EXPECT_DEATH({ auto stolen{std::move(set)}; }, "locked");
 }
 
@@ -289,7 +302,7 @@ TEST(ParticleSetDeathTest, DestroyWhileLocked) {
   EXPECT_DEATH(
       {
         auto set{std::make_unique<MPS2>(makeWeighted({1.0}))};
-        auto view{set->toParticleSet()};
+        auto kde{set->toDensity(Eigen::Matrix2d::Identity())};
         set.reset();
       },
       "locked");

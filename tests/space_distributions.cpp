@@ -14,9 +14,9 @@
 
 using EigenFilter::Composite;
 using EigenFilter::CoordinateKind;
+using EigenFilter::GaussianMixture;
 using EigenFilter::Linear;
-using EigenFilter::MutableGaussianMixture;
-using EigenFilter::MutableParticleSet;
+using EigenFilter::ParticleSet;
 using EigenFilter::Periodic;
 
 namespace {
@@ -28,8 +28,8 @@ struct Heading : Periodic<> {
   using Periodic::Periodic;
 };
 using State = Composite<Position, Heading>;
-using Particles = MutableParticleSet<double, State>;
-using Mixture = MutableGaussianMixture<double, State>;
+using Particles = ParticleSet<double, State>;
+using Mixture = GaussianMixture<double, State>;
 
 // Distance around the circle between two headings.
 double angularGap(double a, double b) { return std::abs(std::remainder(a - b, 2 * pi)); }
@@ -59,7 +59,7 @@ TEST(SpaceParticles, StatesAreNormalizedWhenStored) {
 
 TEST(SpaceParticles, MomentsAreTangentSpaceMoments) {
   const auto set{makeStraddlingParticles()};
-  const auto moments{set.toParticleSet()->moments()};
+  const auto moments{*set.moments()};
   EXPECT_LT(angularGap(moments.mean()(1), pi), 1e-12);
   EXPECT_NEAR(moments.cov()(1, 1), 0.01, 1e-12);  // not ~π², as a linear average would give
   EXPECT_NEAR(moments.mean()(0), 1.5, 1e-12);
@@ -68,7 +68,7 @@ TEST(SpaceParticles, MomentsAreTangentSpaceMoments) {
 TEST(SpaceParticles, KernelDensityWrapsResiduals) {
   auto set{makeStraddlingParticles()};
   set.setBandwidth(Eigen::Matrix2d{{0.1, 0.0}, {0.0, 0.02}});
-  const auto kde{set.toKernelDensity()};
+  const auto kde{set.toDensity()};
   ASSERT_TRUE(kde.has_value());
   // The cloud is symmetric about π, so points the same angular distance either side match.
   EXPECT_NEAR(kde->logPdf(Eigen::Vector2d{1.5, pi - 0.05}), kde->logPdf(Eigen::Vector2d{1.5, -pi + 0.05}), 1e-12);
@@ -82,7 +82,7 @@ TEST(SpaceParticles, KernelDensityWrapsResiduals) {
 TEST(SpaceParticles, ConditionalWrapsAndKeepsTheTargetSpace) {
   struct Swapped : Composite<Heading, Position> {};
   Eigen::Matrix<double, 2, 4> states{{pi - 0.1, pi - 0.1, -pi + 0.1, -pi + 0.1}, {1.0, 2.0, 1.0, 2.0}};
-  MutableParticleSet<double, Swapped> set{Swapped{}, states};
+  ParticleSet<double, Swapped> set{Swapped{}, states};
   set.setBandwidth(Eigen::Matrix2d{{0.02, 0.0}, {0.0, 0.1}});
   // Conditioning on heading -π + 0.1 weights both particle groups the same way as π - 0.1 would.
   const auto a{set.conditional(std::array{1}, std::array{0}, Eigen::Matrix<double, 1, 1>{-pi + 0.1})};
@@ -99,7 +99,7 @@ TEST(SpaceParticles, TagMarginalKeepsTheSubspace) {
   const auto set{makeStraddlingParticles()};
   const auto heading{set.marginal<Heading>().copy()};
   static_assert(std::is_same_v<decltype(heading)::SpaceType, Heading>);
-  const auto moments{heading.toParticleSet()->moments()};
+  const auto moments{*heading.moments()};
   EXPECT_LT(angularGap(moments.mean()(0), pi), 1e-12);
 }
 
@@ -115,7 +115,7 @@ TEST(SpaceMixture, MomentsAndDensityWrap) {
   Mixture mixture;
   mixture.add(0.0, Eigen::Vector2d{1.0, pi - 0.1}, Eigen::Matrix2d::Identity() * 0.01);
   mixture.add(0.0, Eigen::Vector2d{2.0, -pi + 0.1}, Eigen::Matrix2d::Identity() * 0.01);
-  const auto g{mixture.toGaussianMixture()};
+  const auto g{mixture.toDensity()};
   const auto moments{g->moments()};
   EXPECT_LT(angularGap(moments.mean()(1), pi), 1e-12);
   EXPECT_NEAR(moments.cov()(1, 1), 0.01 + 0.01, 1e-12);
@@ -137,8 +137,8 @@ TEST(SpaceFitting, FitsAClusterAcrossTheSeam) {
   truth.add(std::log(0.6), Eigen::Vector2d{0.0, pi}, Eigen::Matrix2d{{1.0, 0.0}, {0.0, 0.04}});
   truth.add(std::log(0.4), Eigen::Vector2d{5.0, 0.0}, Eigen::Matrix2d{{1.0, 0.0}, {0.0, 0.04}});
   std::mt19937_64 rng{3};
-  const Particles particles{State{}, EigenFilter::drawSamples(*truth.toGaussianMixture(), 20000, rng)};
-  const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 2, rng)};
+  const Particles particles{State{}, EigenFilter::drawSamples(*truth.toDensity(), 20000, rng)};
+  const auto fit{EigenFilter::fitMixture(particles, 2, rng)};
   ASSERT_TRUE(fit.has_value());
   static_assert(std::is_same_v<decltype(fit->mixture), Mixture>);
   ASSERT_EQ(fit->mixture.size(), 2);
@@ -157,7 +157,7 @@ TEST(SpaceFitting, ReducesAMixtureAcrossTheSeam) {
     stacked.add(0.0, Eigen::Vector2d{1.0, heading}, Eigen::Matrix2d{{0.5, 0.0}, {0.0, 0.01}});
   }
   std::mt19937_64 rng{4};
-  const auto fit{EigenFilter::fitMixture(*stacked.toGaussianMixture(), 1, rng)};
+  const auto fit{EigenFilter::fitMixture(*stacked.toDensity(), 1, rng)};
   ASSERT_TRUE(fit.has_value());
   const auto& component{*fit->mixture.begin()};
   EXPECT_LT(angularGap(component.gaussian.mean()(1), pi), 1e-9);
