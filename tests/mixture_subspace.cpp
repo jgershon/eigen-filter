@@ -8,11 +8,11 @@
 #include <optional>
 #include <tuple>
 
-using EigenFilter::MutableGaussianMixture;
+using EigenFilter::MutableGaussianMixtureN;
 
 namespace {
 
-using MGM4 = MutableGaussianMixture<double, 4>;
+using MGM4 = MutableGaussianMixtureN<double, 4>;
 
 Eigen::Matrix4d makeSpd(double phase) {
   const Eigen::Matrix4d a{Eigen::Matrix4d::NullaryExpr(
@@ -51,7 +51,7 @@ TEST(GaussianMixtureMarginal, MarginalizesEveryComponent) {
   }
 
   auto copy{marginal.copy()};
-  static_assert(std::is_same_v<decltype(copy), MutableGaussianMixture<double, 2>>);
+  static_assert(std::is_same_v<decltype(copy), MutableGaussianMixtureN<double, 2>>);
   EXPECT_EQ(copy.size(), 3);
   EXPECT_TRUE(copy.toGaussianMixture().has_value());
 }
@@ -71,7 +71,7 @@ TEST(GaussianMixtureConditional, ConditionsEachComponentAndReweights) {
   const std::array target{2, 0};
   const std::array given{1, 3};
   const auto conditional{mixture.conditional(target, given, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianMixture<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianMixtureN<double, 2>>);
   ASSERT_EQ(conditional.size(), 3);
 
   for (Eigen::Index i{0}; i < conditional.size(); ++i) {
@@ -89,7 +89,7 @@ TEST(GaussianMixtureConditional, TotalWeightIsMarginalLikelihood) {
   const auto mixture{make()};
   const Eigen::Vector2d v{0.4, -1.1};
   const auto conditional{mixture.conditional(std::array{1, 3}, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianMixture<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianMixtureN<double, 2>>);
 
   const auto marginalAtGiven{mixture.marginal(std::array{1, 3}).copy()};
   const double expected{*mixture.logTotalWeight() + marginalAtGiven.toGaussianMixture()->logPdf(v)};

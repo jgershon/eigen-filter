@@ -28,22 +28,23 @@ namespace EigenFilter {
  * Created by kernelDensity(). Holds a copy of the ParticleSet view, so the
  * source MutableParticleSet stays locked for the lifetime of the estimate.
  *
- * \sa kernelDensity(), silvermanBandwidth(), class ParticleSet
+ * \sa kernelDensity(), silvermanBandwidth(), class ParticleSet, KernelDensityN
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_, typename Space_ = Linear<Size_, MaxSize_>>
+template <typename Scalar_, typename Space_>
 class KernelDensity {
  public:
   using SpaceType = Space_;
-  using ParticleSetType = ParticleSet<Scalar_, Size_, MaxSize_, Space_>;
-  using KernelType = MutableGaussian<Scalar_, Size_, MaxSize_>;
+  using ParticleSetType = ParticleSet<Scalar_, Space_>;
+  static constexpr int SizeAtCompileTime{ParticleSetType::SizeAtCompileTime};
+  static constexpr int MaxSizeAtCompileTime{ParticleSetType::MaxSizeAtCompileTime};
+  /** The zero-mean kernel, in the linear tangent space of \a Space_. */
+  using KernelType = MutableGaussianN<Scalar_, SizeAtCompileTime, MaxSizeAtCompileTime>;
   using MomentsType = typename ParticleSetType::MomentsType;
   using Scalar = typename ParticleSetType::Scalar;
   using Index = typename ParticleSetType::Index;
   using VectorType = typename ParticleSetType::VectorType;
   using MatrixType = typename ParticleSetType::MatrixType;
   using SampleSetType = typename ParticleSetType::SampleSetType;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
 
   /** \returns a kernel density estimate with bandwidth \a bandwidth, or a
    *          GaussianError if \a bandwidth is not positive definite or not finite.
@@ -143,10 +144,10 @@ class KernelDensity {
 /** \returns a kernel density estimate over \a particles with bandwidth \a bandwidth,
  *          or a GaussianError if \a bandwidth is not positive definite or not finite.
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, typename Derived>
-[[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize, Space>, GaussianError> kernelDensity(
-    const ParticleSet<Scalar, Size, MaxSize, Space>& particles, const Eigen::MatrixBase<Derived>& bandwidth) {
-  return KernelDensity<Scalar, Size, MaxSize, Space>::create(particles, bandwidth);
+template <typename Scalar, typename Space, typename Derived>
+[[nodiscard]] std::expected<KernelDensity<Scalar, Space>, GaussianError> kernelDensity(
+    const ParticleSet<Scalar, Space>& particles, const Eigen::MatrixBase<Derived>& bandwidth) {
+  return KernelDensity<Scalar, Space>::create(particles, bandwidth);
 }
 
 /** \returns a kernel density estimate over \a particles with their kdeBandwidth(): the
@@ -154,9 +155,9 @@ template <typename Scalar, int Size, int MaxSize, typename Space, typename Deriv
  *          with a GaussianError if that bandwidth is not positive definite (for
  *          example, Silverman's rule when every particle has the same state).
  */
-template <typename Scalar, int Size, int MaxSize, typename Space>
-[[nodiscard]] std::expected<KernelDensity<Scalar, Size, MaxSize, Space>, GaussianError> kernelDensity(
-    const ParticleSet<Scalar, Size, MaxSize, Space>& particles) {
+template <typename Scalar, typename Space>
+[[nodiscard]] std::expected<KernelDensity<Scalar, Space>, GaussianError> kernelDensity(
+    const ParticleSet<Scalar, Space>& particles) {
   return kernelDensity(particles, particles.kdeBandwidth());
 }
 
@@ -170,13 +171,12 @@ template <typename Scalar, int Size, int MaxSize, typename Space>
  *
  * \sa drawSamplesWithLogPdf(const KernelDensity&, Eigen::Index, G&, const R&), \ref Resamplers
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G,
-          typename R = MultinomialResampler>
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G, typename R = MultinomialResampler>
   requires Resampler<R, Scalar, G>
-[[nodiscard]] SampleSet<Scalar, Size, MaxSize> drawSamples(const KernelDensity<Scalar, Size, MaxSize, Space>& kde,
-                                                           Eigen::Index n, G& rng, const R& resampler = {}) {
+[[nodiscard]] SampleSet<Scalar, Space> drawSamples(const KernelDensity<Scalar, Space>& kde, Eigen::Index n, G& rng,
+                                                   const R& resampler = {}) {
   EIGEN_FILTER_ASSERT(n >= 0);
-  using SampleSetType = SampleSet<Scalar, Size, MaxSize>;
+  using SampleSetType = SampleSet<Scalar, Space>;
   const auto& particles{kde.particles()};
   std::vector<Scalar> weights(std::size_t(particles.size()));
   for (Eigen::Index i{0}; i < particles.size(); ++i) {
@@ -200,15 +200,18 @@ template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_r
  *
  * \sa drawSamples(const KernelDensity&, Eigen::Index, G&, const R&)
  */
-template <typename Scalar, int Size, int MaxSize, typename Space, std::uniform_random_bit_generator G,
-          typename R = MultinomialResampler>
+template <typename Scalar, typename Space, std::uniform_random_bit_generator G, typename R = MultinomialResampler>
   requires Resampler<R, Scalar, G>
-[[nodiscard]] SamplesWithLogPdf<Scalar, Size, MaxSize> drawSamplesWithLogPdf(
-    const KernelDensity<Scalar, Size, MaxSize, Space>& kde, Eigen::Index n, G& rng, const R& resampler = {}) {
-  SamplesWithLogPdf<Scalar, Size, MaxSize> result{drawSamples(kde, n, rng, resampler), {}};
+[[nodiscard]] SamplesWithLogPdf<Scalar, Space> drawSamplesWithLogPdf(const KernelDensity<Scalar, Space>& kde,
+                                                                     Eigen::Index n, G& rng, const R& resampler = {}) {
+  SamplesWithLogPdf<Scalar, Space> result{drawSamples(kde, n, rng, resampler), {}};
   result.logPdf.resize(n);
   for (Eigen::Index j{0}; j < n; ++j) result.logPdf(j) = kde.logPdf(result.samples.col(j));
   return result;
 }
+
+/** A KernelDensity of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using KernelDensityN = KernelDensity<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter

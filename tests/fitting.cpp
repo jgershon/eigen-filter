@@ -10,14 +10,14 @@
 
 using EigenFilter::FitError;
 using EigenFilter::FitOptions;
-using EigenFilter::MutableGaussian;
-using EigenFilter::MutableGaussianMixture;
-using EigenFilter::MutableParticleSet;
+using EigenFilter::MutableGaussianMixtureN;
+using EigenFilter::MutableGaussianN;
+using EigenFilter::MutableParticleSetN;
 
 namespace {
 
-using MGM2 = MutableGaussianMixture<double, 2>;
-using MPS2 = MutableParticleSet<double, 2>;
+using MGM2 = MutableGaussianMixtureN<double, 2>;
+using MPS2 = MutableParticleSetN<double, 2>;
 
 const std::array<Eigen::Vector2d, 3> trueMeans{Eigen::Vector2d{-6.0, 0.0}, Eigen::Vector2d{0.0, 6.0},
                                                Eigen::Vector2d{6.0, 0.0}};
@@ -63,7 +63,7 @@ TEST(FitMixture, UsesParticleWeights) {
   // Importance sampling from a broad proposal: the weights alone carry the target's shape.
   const auto truth{makeTrueMixture()};
   const auto target{truth.toGaussianMixture()};
-  const MutableGaussian<double, 2> proposal{Eigen::Vector2d{0.0, 2.0}, 49.0 * Eigen::Matrix2d::Identity()};
+  const MutableGaussianN<double, 2> proposal{Eigen::Vector2d{0.0, 2.0}, 49.0 * Eigen::Matrix2d::Identity()};
   std::mt19937_64 rng{43};
   const auto drawn{EigenFilter::drawSamplesWithLogPdf(*proposal.toGaussian(), 60000, rng)};
   Eigen::ArrayXd logWeights{drawn.logPdf.size()};
@@ -84,7 +84,7 @@ TEST(FitMixture, ReducesJitteredMixtureWithoutSampling) {
   MGM2 children;
   children.reserve(999);
   for (std::size_t c{0}; c < 3; ++c) {
-    const MutableGaussian<double, 2> jitter{trueMeans[c], 0.5 * trueCovs[c]};
+    const MutableGaussianN<double, 2> jitter{trueMeans[c], 0.5 * trueCovs[c]};
     const auto centers{EigenFilter::drawSamples(*jitter.toGaussian(), 333, rng)};
     for (Eigen::Index j{0}; j < centers.cols(); ++j) {
       children.add(std::log(trueWeights[c] / 333.0), centers.col(j), 0.5 * trueCovs[c]);
@@ -182,11 +182,11 @@ TEST(FitMixture, LogLikelihoodNeverDecreases) {
 TEST(FitMixture, DynamicSize) {
   const auto truth{makeTrueMixture()};
   std::mt19937_64 rng{73};
-  const MutableParticleSet<double, Eigen::Dynamic> particles{
+  const MutableParticleSetN<double, Eigen::Dynamic> particles{
       Eigen::MatrixXd{EigenFilter::drawSamples(*truth.toGaussianMixture(), 5000, rng)}};
   const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 3, rng)};
   ASSERT_TRUE(fit.has_value());
-  static_assert(std::is_same_v<decltype(fit->mixture), MutableGaussianMixture<double, Eigen::Dynamic>>);
+  static_assert(std::is_same_v<decltype(fit->mixture), MutableGaussianMixtureN<double, Eigen::Dynamic>>);
   EXPECT_EQ(fit->mixture.componentSize(), 2);
 }
 

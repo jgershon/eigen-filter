@@ -17,6 +17,7 @@ using EigenFilter::ComponentError;
 using EigenFilter::GaussianError;
 using EigenFilter::GaussianMixtureError;
 using EigenFilter::MutableGaussianMixture;
+using EigenFilter::MutableGaussianMixtureN;
 using EigenFilter::WeightError;
 
 namespace {
@@ -24,13 +25,13 @@ namespace {
 constexpr double inf{std::numeric_limits<double>::infinity()};
 
 // Lets std::vector move rather than copy components on reallocation.
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussianMixture<double, Eigen::Dynamic>::Component>);
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussianMixture<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<MutableGaussianMixtureN<double, Eigen::Dynamic>::Component>);
+static_assert(std::is_nothrow_move_constructible_v<MutableGaussianMixtureN<double, Eigen::Dynamic>>);
 
 // Each config names a MutableGaussianMixture type and the component dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableGaussianMixture<Scalar, Size, MaxSize>;
+  using Type = MutableGaussianMixtureN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -176,7 +177,7 @@ TYPED_TEST(GaussianMixtureTest, EffectiveSampleSize) {
 
 namespace {
 
-using MGM2 = MutableGaussianMixture<double, 2>;
+using MGM2 = MutableGaussianMixtureN<double, 2>;
 
 // A 2-D mixture with the given weights, each component at a distinct mean.
 MGM2 makeWeighted(const std::vector<double>& weights) {
@@ -262,7 +263,7 @@ TEST(GaussianMixture, ForEachScalesWeightsAndModifiesComponents) {
 
 TEST(GaussianMixture, MergeSumsWeights) {
   auto mixture{makeWeighted({1.0, 3.0, 5.0})};
-  const EigenFilter::Moments<double, 2> merged{Eigen::Vector2d{7.0, 8.0}, Eigen::Matrix2d::Identity()};
+  const EigenFilter::MomentsN<double, 2> merged{Eigen::Vector2d{7.0, 8.0}, Eigen::Matrix2d::Identity()};
   const auto it{mixture.merge(mixture.begin(), mixture.begin() + 1, merged)};
   EXPECT_EQ(mixture.size(), 2);
   EXPECT_DOUBLE_EQ(it->logWeight, std::log(4.0));
@@ -281,8 +282,8 @@ TEST(GaussianMixture, MergeIntoLastComponent) {
 
 TEST(GaussianMixture, SplitRedistributesWeight) {
   auto mixture{makeWeighted({6.0, 1.0})};
-  const EigenFilter::Moments<double, 2> a{Eigen::Vector2d{-1.0, 0.0}, Eigen::Matrix2d::Identity()};
-  const EigenFilter::Moments<double, 2> b{Eigen::Vector2d{1.0, 0.0}, Eigen::Matrix2d::Identity()};
+  const EigenFilter::MomentsN<double, 2> a{Eigen::Vector2d{-1.0, 0.0}, Eigen::Matrix2d::Identity()};
+  const EigenFilter::MomentsN<double, 2> b{Eigen::Vector2d{1.0, 0.0}, Eigen::Matrix2d::Identity()};
   const std::array children{std::pair{std::log(1.0), a}, std::pair{std::log(2.0), b}};
   mixture.split(mixture.begin(), children);
 
@@ -353,7 +354,7 @@ TEST(GaussianMixture, Normalize) {
 }
 
 TEST(GaussianMixture, AssignAndAppend) {
-  using Moments = EigenFilter::Moments<double, 2>;
+  using Moments = EigenFilter::MomentsN<double, 2>;
   MGM2 mixture;
   const std::vector components{std::pair{0.0, Moments{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()}},
                                std::pair{1.0, Moments{Eigen::Vector2d::Ones(), Eigen::Matrix2d::Identity()}}};
@@ -367,7 +368,7 @@ TEST(GaussianMixture, AssignAndAppend) {
 }
 
 TEST(GaussianMixture, ResizeComponentsDynamic) {
-  MutableGaussianMixture<double, Eigen::Dynamic> mixture{2};
+  MutableGaussianMixtureN<double, Eigen::Dynamic> mixture{2};
   mixture.add(0.0, Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity());
   EXPECT_EQ(mixture.componentSize(), 2);
 

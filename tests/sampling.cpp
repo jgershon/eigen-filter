@@ -10,13 +10,14 @@
 #include <type_traits>
 
 using EigenFilter::MutableGaussian;
+using EigenFilter::MutableGaussianN;
 
 namespace {
 
 // Each config names a MutableGaussian type and the dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableGaussian<Scalar, Size, MaxSize>;
+  using Type = MutableGaussianN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -95,17 +96,17 @@ TYPED_TEST(SamplingTest, BothVersionsDrawTheSameSamples) {
 }
 
 TEST(Sampling, FeedsParticleSet) {
-  const MutableGaussian<double, 2> mg{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()};
+  const MutableGaussianN<double, 2> mg{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()};
   std::mt19937_64 rng{5};
   const auto drawn{EigenFilter::drawSamplesWithLogPdf(*mg.toGaussian(), 10, rng)};
   // Importance weights for a uniform target, as a particle filter proposal would use.
-  const EigenFilter::MutableParticleSet<double, 2> set{drawn.samples, -drawn.logPdf};
+  const EigenFilter::MutableParticleSetN<double, 2> set{drawn.samples, -drawn.logPdf};
   EXPECT_EQ(set.size(), 10);
   EXPECT_TRUE((set.logWeights() == -drawn.logPdf).all());
 }
 
 TEST(Sampling, ZeroSamples) {
-  const MutableGaussian<double, Eigen::Dynamic> mg{Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
+  const MutableGaussianN<double, Eigen::Dynamic> mg{Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
   std::mt19937_64 rng{5};
   const auto samples{EigenFilter::drawSamples(*mg.toGaussian(), 0, rng)};
   EXPECT_EQ(samples.rows(), 3);
@@ -115,8 +116,8 @@ TEST(Sampling, ZeroSamples) {
 namespace {
 
 // Three well-separated, narrow 2-D components with unnormalized weights 1, 2, 5.
-EigenFilter::MutableGaussianMixture<double, 2> makeSeparatedMixture(double spread) {
-  EigenFilter::MutableGaussianMixture<double, 2> mixture;
+EigenFilter::MutableGaussianMixtureN<double, 2> makeSeparatedMixture(double spread) {
+  EigenFilter::MutableGaussianMixtureN<double, 2> mixture;
   const Eigen::Matrix2d cov{{spread, 0.3 * spread}, {0.3 * spread, 0.5 * spread}};
   mixture.add(std::log(1.0), Eigen::Vector2d{-10.0, 0.0}, cov);
   mixture.add(std::log(2.0), Eigen::Vector2d{0.0, 10.0}, cov);

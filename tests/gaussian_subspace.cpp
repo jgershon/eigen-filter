@@ -9,12 +9,12 @@
 #include <optional>
 #include <vector>
 
-using EigenFilter::MutableGaussian;
+using EigenFilter::MutableGaussianN;
 
 namespace {
 
-using MG4 = MutableGaussian<double, 4>;
-using MGX = MutableGaussian<double, Eigen::Dynamic>;
+using MG4 = MutableGaussianN<double, 4>;
+using MGX = MutableGaussianN<double, Eigen::Dynamic>;
 
 Eigen::Matrix4d makeSpd() {
   const Eigen::Matrix4d a{Eigen::Matrix4d::NullaryExpr(
@@ -61,7 +61,7 @@ TEST(GaussianMarginal, CopyIsIndependentAndViewIsLive) {
   MG4 mg{mean4, makeSpd()};
   const auto marginal{mg.marginal(std::array{0, 2})};
   auto copy{marginal.copy()};
-  static_assert(std::is_same_v<decltype(copy), MutableGaussian<double, 2>>);
+  static_assert(std::is_same_v<decltype(copy), MutableGaussianN<double, 2>>);
 
   mg.setMean(Eigen::Vector4d::Zero());  // values may change while borrowed
   EXPECT_EQ(marginal.mean(), Eigen::Vector2d::Zero());
@@ -103,7 +103,7 @@ TEST(GaussianConditional, MatchesFormula) {
   const MG4 mg{mean4, withGarbageUpper(makeSpd())};
   const Eigen::Vector2d v{0.3, -0.7};
   const auto conditional{mg.conditional(std::array{2, 0}, std::array{3, 1}, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussian<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianN<double, 2>>);
 
   const auto [mean, cov]{referenceConditional({2, 0}, {3, 1}, v)};
   EXPECT_LT((conditional.mean() - mean).norm(), 1e-12);
@@ -114,7 +114,7 @@ TEST(GaussianConditional, ComplementTarget) {
   const MG4 mg{mean4, makeSpd()};
   const Eigen::Matrix<double, 1, 1> v{0.25};
   const auto conditional{mg.conditional(std::array{1}, v)};
-  static_assert(std::is_same_v<decltype(conditional), const MutableGaussian<double, 3>>);
+  static_assert(std::is_same_v<decltype(conditional), const MutableGaussianN<double, 3>>);
   const auto explicitTarget{mg.conditional(std::array{0, 2, 3}, std::array{1}, v)};
   EXPECT_EQ(conditional.mean(), explicitTarget.mean());
   EXPECT_EQ(conditional.cov(), explicitTarget.cov());

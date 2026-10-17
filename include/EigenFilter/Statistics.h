@@ -13,7 +13,7 @@ template <typename MatrixType, typename DeviationsDerived, typename WeightsDeriv
 [[nodiscard]] MatrixType weightedCovariance(const Eigen::MatrixBase<DeviationsDerived>& deviations,
                                             const Eigen::ArrayBase<WeightsDerived>& w) {
   using Scalar = typename MatrixType::Scalar;
-  using Deviations = SampleSet<Scalar, MatrixType::RowsAtCompileTime, MatrixType::MaxRowsAtCompileTime>;
+  using Deviations = SampleSetN<Scalar, MatrixType::RowsAtCompileTime, MatrixType::MaxRowsAtCompileTime>;
   const Deviations scaled{deviations * w.sqrt().matrix().asDiagonal()};
   MatrixType cov{deviations.rows(), deviations.rows()};
   if constexpr (MatrixType::MaxRowsAtCompileTime == 1) {
@@ -62,7 +62,7 @@ template <typename MomentsType, typename Space, typename StatesDerived, typename
   } else {
     using Scalar = typename MomentsType::Scalar;
     using VectorType = typename MomentsType::VectorType;
-    using Deviations = SampleSet<Scalar, MomentsType::SizeAtCompileTime, MomentsType::MaxSizeAtCompileTime>;
+    using Deviations = SampleSet<Scalar, typename MomentsType::SpaceType>;
     const Eigen::Array<Scalar, Eigen::Dynamic, 1> w{(logWeights - logTotal).exp()};
     Eigen::Index reference{0};
     w.maxCoeff(&reference);

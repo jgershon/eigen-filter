@@ -1,30 +1,35 @@
 #pragma once
 
 #include "Macros.h"
+#include "Space.h"
 
 namespace EigenFilter {
 
 /** \brief First and second moments (mean and covariance) of a distribution.
  *
- * \tparam Scalar_   scalar type
- * \tparam Size_     dimension, or \c Eigen::Dynamic
- * \tparam MaxSize_  maximum dimension; a fixed value with \c Size_ = \c Eigen::Dynamic
- *                   keeps storage on the stack
+ * \tparam Scalar_  scalar type
+ * \tparam Space_   space of the mean (see \ref Spaces), which sets the dimension and the
+ *                  storage bound. The space is part of the type only: none is stored,
+ *                  and the mean is not normalized.
  *
  * No invariants are enforced: the covariance is not required to be symmetric or
  * positive definite. Like Eigen matrices, fixed-size Moments are uninitialized
  * by default.
+ *
+ * \sa MomentsN
  */
-template <typename Scalar_, int Size_, int MaxSize_ = Size_>
+template <typename Scalar_, typename Space_>
 class Moments {
  public:
   using Scalar = Scalar_;
   using Index = Eigen::Index;
-  static constexpr int SizeAtCompileTime{Size_};
-  static constexpr int MaxSizeAtCompileTime{MaxSize_};
+  using SpaceType = Space_;
+  static constexpr int SizeAtCompileTime{spaceSize<Space_>};
+  static constexpr int MaxSizeAtCompileTime{spaceMaxSize<Space_>};
 
-  using VectorType = Eigen::Matrix<Scalar, Size_, 1, Eigen::ColMajor, MaxSize_, 1>;
-  using MatrixType = Eigen::Matrix<Scalar, Size_, Size_, Eigen::ColMajor, MaxSize_, MaxSize_>;
+  using VectorType = Eigen::Matrix<Scalar, SizeAtCompileTime, 1, Eigen::ColMajor, MaxSizeAtCompileTime, 1>;
+  using MatrixType = Eigen::Matrix<Scalar, SizeAtCompileTime, SizeAtCompileTime, Eigen::ColMajor, MaxSizeAtCompileTime,
+                                   MaxSizeAtCompileTime>;
 
   Moments() = default;
 
@@ -54,5 +59,9 @@ class Moments {
   VectorType m_mean;
   MatrixType m_cov;
 };
+
+/** Moments of dimension \a Size in a linear space, with storage bound \a MaxSize. */
+template <typename Scalar, int Size, int MaxSize = Size>
+using MomentsN = Moments<Scalar, Linear<Size, MaxSize>>;
 
 }  // namespace EigenFilter

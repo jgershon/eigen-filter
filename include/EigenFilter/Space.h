@@ -18,8 +18,10 @@ namespace EigenFilter {
  *
  * A space describes how the coordinates of a vector behave: whether they wrap,
  * fold at a bound, or are plain linear values, and how many there are. Every
- * distribution type takes a space as an optional last template parameter, which
- * defaults to Linear and then costs nothing.
+ * distribution type, and Moments and SampleSet, is parameterized by a scalar and a
+ * space, and takes its size and storage bound from the space; Linear costs nothing.
+ * Each also has an Eigen-style alias taking sizes instead, such as
+ * <tt>MutableGaussianN<double, 3></tt> for <tt>MutableGaussian<double, Linear<3>></tt>.
  *
  * A space provides two operations, applied to blocks whose rows are its coordinates
  * and whose columns are samples:
@@ -38,8 +40,8 @@ namespace EigenFilter {
  * the block its resizable tail repeats, or 0 if it is fully fixed), \c MaxSize (the
  * largest valid size, or \c Eigen::Dynamic if unbounded), and \c IsLinear. Like Eigen's
  * matrices, the coordinate types take a size and a maximum size, and Repeated takes a
- * maximum number of repetitions; MutableGaussianIn and friends use the space's
- * \c MaxSize as their storage bound, so a capped space gets fixed-capacity storage.
+ * maximum number of repetitions. Distributions use the space's \c MaxSize as their
+ * storage bound, so a capped space gets fixed-capacity storage.
  */
 
 /** How one coordinate of a CoordinateSpace behaves. */
@@ -325,13 +327,15 @@ class Composite {
  * Its size is always a multiple of the block's size. Every repetition shares the
  * block's parameters (periods and bounds).
  */
-template <typename Block, int MaxCount = Eigen::Dynamic>
+template <typename Block, int MaxCount_ = Eigen::Dynamic>
 class Repeated {
   static_assert(Block::Stride == 0 && Block::FixedSize > 0, "a repeated block must have a fixed, nonzero size");
-  static_assert(MaxCount == Eigen::Dynamic || MaxCount >= 0);
+  static_assert(MaxCount_ == Eigen::Dynamic || MaxCount_ >= 0);
 
  public:
   using BlockType = Block;
+  /** Maximum number of repetitions, or \c Eigen::Dynamic if unbounded. */
+  static constexpr int MaxCount{MaxCount_};
   static constexpr int FixedSize{0};
   static constexpr int Stride{Block::FixedSize};
   static constexpr int MaxSize{MaxCount == Eigen::Dynamic ? Eigen::Dynamic : MaxCount * Block::FixedSize};
@@ -458,8 +462,8 @@ concept IsComposite = requires(const T* t) { compositeBlocks(t); };
 template <typename T>
 using CompositeBlocks = std::remove_pointer_t<decltype(compositeBlocks(std::declval<const T*>()))>;
 
-template <typename Block>
-Block* repeatedBlock(const Repeated<Block>*);
+template <typename Block, int MaxCount>
+Block* repeatedBlock(const Repeated<Block, MaxCount>*);
 template <typename T>
 concept IsRepeated = requires(const T* t) { repeatedBlock(t); };
 template <typename T>
@@ -622,7 +626,7 @@ template <typename Tag, typename Space>
 
 /** \returns the space of the subspace named by \a Tag and \a Rest within \a space: the
  * tag's own block, or for a path through a repeated block, the selected coordinate
- * repeated.
+ * repeated up to the same maximum count.
  */
 template <typename Space, typename Tag, typename... Rest>
 [[nodiscard]] auto subspace(const Space& space) {
@@ -631,7 +635,7 @@ template <typename Space, typename Tag, typename... Rest>
     return tag;
   } else if constexpr (IsRepeated<Tag>) {
     auto inner{subspace<RepeatedBlock<Tag>, Rest...>(tag.block())};
-    return Repeated<decltype(inner)>{std::move(inner)};
+    return Repeated<decltype(inner), Tag::MaxCount>{std::move(inner)};
   } else {
     return subspace<Tag, Rest...>(tag);
   }

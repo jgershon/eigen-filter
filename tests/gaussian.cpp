@@ -13,17 +13,18 @@
 
 using EigenFilter::GaussianError;
 using EigenFilter::MutableGaussian;
+using EigenFilter::MutableGaussianN;
 
 namespace {
 
 // Lets std::vector move rather than copy on reallocation.
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussian<double, Eigen::Dynamic>>);
-static_assert(std::is_nothrow_move_constructible_v<MutableGaussian<double, 3>>);
+static_assert(std::is_nothrow_move_constructible_v<MutableGaussianN<double, Eigen::Dynamic>>);
+static_assert(std::is_nothrow_move_constructible_v<MutableGaussianN<double, 3>>);
 
 // Each config names a MutableGaussian type and the runtime dimension to test it at.
 template <typename Scalar, int Size, int MaxSize, int N>
 struct Config {
-  using Type = MutableGaussian<Scalar, Size, MaxSize>;
+  using Type = MutableGaussianN<Scalar, Size, MaxSize>;
   static constexpr Eigen::Index n{N};
 };
 
@@ -182,7 +183,7 @@ TYPED_TEST(GaussianTest, CopyOfLockedSourceIsUnlocked) {
 }
 
 TEST(Gaussian, ResizeDynamic) {
-  MutableGaussian<double, Eigen::Dynamic> mg{2};
+  MutableGaussianN<double, Eigen::Dynamic> mg{2};
   mg.setMean(Eigen::Vector2d::Zero());
   mg.setCov(Eigen::Matrix2d::Identity());
   ASSERT_TRUE(mg.toGaussian().has_value());
@@ -201,7 +202,7 @@ TEST(Gaussian, ResizeDynamic) {
 
 class GaussianDeathTest : public ::testing::Test {
  protected:
-  using MG = MutableGaussian<double, 2>;
+  using MG = MutableGaussianN<double, 2>;
   static MG make() { return MG{Eigen::Vector2d::Zero(), Eigen::Matrix2d::Identity()}; }
 };
 

@@ -12,12 +12,12 @@
 
 using EigenFilter::GaussianError;
 using EigenFilter::KernelDensityError;
-using EigenFilter::MutableParticleSet;
+using EigenFilter::MutableParticleSetN;
 using EigenFilter::WeightError;
 
 namespace {
 
-using MPS3 = MutableParticleSet<double, 3>;
+using MPS3 = MutableParticleSetN<double, 3>;
 
 // Nine full-rank particles with unnormalized weights 1..9.
 MPS3 make() {
@@ -55,7 +55,7 @@ TEST(ParticleSetMarginal, MarginalizesStoredBandwidth) {
   EXPECT_EQ(*marginal.bandwidth(), expected);
 
   const auto copy{marginal.copy()};
-  static_assert(std::is_same_v<decltype(copy), const MutableParticleSet<double, 2>>);
+  static_assert(std::is_same_v<decltype(copy), const MutableParticleSetN<double, 2>>);
   ASSERT_TRUE(copy.bandwidth().has_value());
   EXPECT_EQ(*copy.bandwidth(), expected);
 }
@@ -87,7 +87,7 @@ TEST(ParticleSetBandwidth, StoredOrSilverman) {
   set.clearBandwidth();
   EXPECT_FALSE(set.bandwidth().has_value());
 
-  MutableParticleSet<double, Eigen::Dynamic> dynamic{Eigen::MatrixXd::Random(2, 5)};
+  MutableParticleSetN<double, Eigen::Dynamic> dynamic{Eigen::MatrixXd::Random(2, 5)};
   dynamic.setBandwidth(Eigen::Matrix2d::Identity());
   dynamic.resizeParticles(3);
   EXPECT_FALSE(dynamic.bandwidth().has_value());
@@ -106,7 +106,7 @@ TEST(KernelDensityConditional, IsJointOverMarginal) {
   const std::array given{1};
 
   auto conditional{set.conditional(given, v)};
-  static_assert(std::is_same_v<decltype(conditional), MutableParticleSet<double, 2>>);
+  static_assert(std::is_same_v<decltype(conditional), MutableParticleSetN<double, 2>>);
   ASSERT_TRUE(conditional.bandwidth().has_value());
   const auto conditionalKde{conditional.toKernelDensity()};
   ASSERT_TRUE(conditionalKde.has_value());
