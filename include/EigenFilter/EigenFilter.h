@@ -14,3 +14,4 @@
 #include "Sampling.h"
 #include "KernelDensity.h"
 #include "Fitting.h"
+#include "Transform.h"
