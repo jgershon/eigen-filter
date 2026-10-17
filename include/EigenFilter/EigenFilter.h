@@ -11,3 +11,4 @@
 #include "SampleSet.h"
 #include "Sampling.h"
 #include "KernelDensity.h"
+#include "Fitting.h"
