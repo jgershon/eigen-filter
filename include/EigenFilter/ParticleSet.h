@@ -70,19 +70,14 @@ template <typename MomentsType, typename Space, typename StatesDerived, typename
  * \f$ K = H_{ab} H_{bb}^{-1} \f$, its weight gains \f$ \log \mathcal{N}(v; x_{b,i}, H_{bb}) \f$,
  * and the shared bandwidth becomes \f$ H_{aa} - K H_{ba} \f$.
  */
-template <typename Source, typename BandwidthDerived, typename TargetIndices, typename GivenIndices, typename Derived>
-[[nodiscard]] auto conditionalParticles(const Source& source, const Eigen::MatrixBase<BandwidthDerived>& bandwidth,
-                                        const TargetIndices& targetIndices, const GivenIndices& givenIndices,
-                                        const Eigen::MatrixBase<Derived>& values) {
+template <typename Source, typename BandwidthDerived, typename Target, typename Given, typename Derived,
+          typename TargetSpace>
+[[nodiscard]] auto conditionalParticlesIn(const Source& source, const Eigen::MatrixBase<BandwidthDerived>& bandwidth,
+                                          const Target& target, const Given& given,
+                                          const Eigen::MatrixBase<Derived>& values, const TargetSpace& targetSpace) {
   using Scalar = typename Source::Scalar;
-  constexpr int SourceSize{Source::SizeAtCompileTime};
-  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
-  const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), targetIndices)};
-  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), givenIndices)};
   EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
   EIGEN_FILTER_ASSERT(values.size() == given.size());
-  using Target = std::remove_cvref_t<decltype(target)>;
-  using Given = std::remove_cvref_t<decltype(given)>;
   constexpr int TargetSize{Target::RowsAtCompileTime};
   constexpr int TargetMaxSize{Target::MaxRowsAtCompileTime};
   constexpr int GivenSize{Given::RowsAtCompileTime};
@@ -91,7 +86,6 @@ template <typename Source, typename BandwidthDerived, typename TargetIndices, ty
   using CrossMatrix = MatrixOf<Scalar, TargetSize, GivenSize, TargetMaxSize, GivenMaxSize>;
   using GivenStates = SampleSetN<Scalar, GivenSize, GivenMaxSize>;
   using TargetStates = SampleSetN<Scalar, TargetSize, TargetMaxSize>;
-  auto targetSpace{projectSpace<TargetSize, TargetMaxSize>(source.space(), source.particleSize(), target)};
   const auto givenSpace{projectSpace<GivenSize, GivenMaxSize>(source.space(), source.particleSize(), given)};
 
   const Eigen::LDLT<GivenMatrix> ldlt{GivenMatrix{lowerSymmetricBlock(bandwidth, given, given)}};
@@ -106,11 +100,36 @@ template <typename Source, typename BandwidthDerived, typename TargetIndices, ty
   const Scalar logNormalizer{Scalar(-0.5) * (Scalar(given.size()) * log2Pi + ldlt.vectorD().array().log().sum())};
 
   const TargetStates centers{source.states()(target, Eigen::placeholders::all) - gain * offsets};
-  ParticleSet<Scalar, decltype(targetSpace)> result{
+  ParticleSet<Scalar, TargetSpace> result{
       targetSpace, centers,
       Eigen::Array<Scalar, Eigen::Dynamic, 1>{source.logWeights() + logNormalizer - Scalar(0.5) * wsse.transpose()}};
   result.setBandwidth(lowerSymmetricBlock(bandwidth, target, target) - gain * cross.transpose());
   return result;
+}
+
+/** conditionalParticlesIn() for any index sets, with the target in the projection of the source's space. */
+template <typename Source, typename BandwidthDerived, typename TargetIndices, typename GivenIndices, typename Derived>
+[[nodiscard]] auto conditionalParticles(const Source& source, const Eigen::MatrixBase<BandwidthDerived>& bandwidth,
+                                        const TargetIndices& targetIndices, const GivenIndices& givenIndices,
+                                        const Eigen::MatrixBase<Derived>& values) {
+  constexpr int SourceSize{Source::SizeAtCompileTime};
+  constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
+  const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), targetIndices)};
+  const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.particleSize(), givenIndices)};
+  using Target = std::remove_cvref_t<decltype(target)>;
+  return conditionalParticlesIn(source, bandwidth, target, given, values,
+                                projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(
+                                    source.space(), source.particleSize(), target));
+}
+
+/** Shared implementation of conditional<GivenPath...>(); see tagConditional(). */
+template <typename... GivenPath, typename Source, typename BandwidthDerived, typename Derived>
+[[nodiscard]] auto tagConditionalParticles(const Source& source, const Eigen::MatrixBase<BandwidthDerived>& bandwidth,
+                                           const Eigen::MatrixBase<Derived>& values) {
+  return tagConditional<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime, GivenPath...>(
+      source.space(), source.particleSize(), [&](const auto& target, const auto& given, const auto& targetSpace) {
+        return conditionalParticlesIn(source, bandwidth, target, given, values, targetSpace);
+      });
 }
 
 /** conditionalParticles() with every entry not in \a givenIndices as the target. */
@@ -152,6 +171,10 @@ template <typename Source, typename BandwidthDerived, typename GivenIndices, typ
  * marginal is alive this object is borrowed: states, weights, and bandwidth may
  * change, but adding, removing, resampling, or resizing particles, or moving or
  * destroying this object, is a programmer error.
+ *
+ * The space's size always matches the states'. insert() and erase() grow and shrink one
+ * resizable block of the space in place, and resizeParticles() resizes a space with a
+ * single resizable block.
  *
  * \tparam Scalar_  scalar type
  * \tparam Space_   space of the states, which sets their dimension and storage bound
@@ -216,7 +239,7 @@ class ParticleSet {
   ParticleSet() = default;
 
   /** Constructs an empty set whose particles will have dimension \a particleSize. */
-  explicit ParticleSet(Index particleSize) : m_states{particleSize, 0} { adoptSize(); }
+  explicit ParticleSet(Index particleSize) : m_states{particleSize, 0} { fitSpace(); }
 
   /** Constructs a set from the columns of \a states, with equal weights summing to one. */
   template <typename StatesDerived>
@@ -229,8 +252,14 @@ class ParticleSet {
     assign(states, logWeights);
   }
 
-  /** Constructs an empty set in \a space whose particles will have dimension \a particleSize. */
-  ParticleSet(Space_ space, Index particleSize) : m_states{particleSize, 0}, m_space{std::move(space)} { checkSpace(); }
+  /** Constructs an empty set in \a space. */
+  explicit ParticleSet(Space_ space) : m_states{space.size(), 0}, m_space{std::move(space)} { fitSpace(); }
+
+  /** Constructs an empty set in \a space whose particles will have dimension \a particleSize.
+   * A space with one resizable block is resized to \a particleSize; any other must already
+   * have that size.
+   */
+  ParticleSet(Space_ space, Index particleSize) : m_states{particleSize, 0}, m_space{std::move(space)} { fitSpace(); }
 
   /** Constructs a set in \a space from the columns of \a states, with equal weights summing to one. */
   template <typename StatesDerived>
@@ -238,7 +267,7 @@ class ParticleSet {
       : m_states{states},
         m_logWeights{WeightArrayType::Constant(states.cols(), -Eigen::numext::log(Scalar(states.cols())))},
         m_space{std::move(space)} {
-    checkSpace();
+    fitSpace();
   }
 
   template <typename StatesDerived, typename WeightsDerived>
@@ -246,7 +275,7 @@ class ParticleSet {
               const Eigen::DenseBase<WeightsDerived>& logWeights)
       : m_states{states}, m_logWeights{logWeights.derived().array()}, m_space{std::move(space)} {
     EIGEN_FILTER_ASSERT(m_logWeights.size() == m_states.cols());
-    checkSpace();
+    fitSpace();
   }
 
   /** Copies the particles and any stored bandwidth. The copy starts unlocked and unborrowed. */
@@ -341,10 +370,41 @@ class ParticleSet {
   void resizeParticles(Index n) {
     assertUnlocked();
     assertUnborrowed();
-    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
+    if constexpr (requires { m_space.resize(n); }) m_space.resize(n);
+    EIGEN_FILTER_ASSERT(m_space.size() == n && "the size does not fit the space");
     m_states.resize(n, size());
     m_bandwidth.reset();
-    adoptSize();
+  }
+
+  /** Inserts the state entries \a states, one column per particle, into the resizable block
+   * named by the tag path \a Path, before its element \a element. The space's block grows to
+   * match. A stored bandwidth no longer fits and is cleared, so kdeBandwidth() returns to
+   * Silverman's rule. See Gaussian::insert() for what an element is.
+   */
+  template <typename... Path, typename Derived>
+    requires(sizeof...(Path) > 0)
+  void insert(Index element, const Eigen::MatrixBase<Derived>& states) {
+    assertUnlocked();
+    assertUnborrowed();
+    EIGEN_FILTER_ASSERT(states.cols() == size() && "insert one column per particle");
+    const auto rows{internal::growBlock<Path...>(m_space, element, states.rows())};
+    internal::insertRows(m_states, rows.start, states);
+    m_space.normalizeValues(m_states);
+    m_bandwidth.reset();
+  }
+
+  /** Removes \a count elements of the resizable block named by the tag path \a Path from every
+   * particle, starting at its element \a element. A stored bandwidth is marginalized, which
+   * keeps the kernel density estimate exact.
+   */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  void erase(Index element, Index count = 1) {
+    assertUnlocked();
+    assertUnborrowed();
+    const auto rows{internal::shrinkBlock<Path...>(m_space, element, count)};
+    internal::eraseRows(m_states, rows.start, rows.count);
+    if (m_bandwidth) internal::eraseSymmetric(*m_bandwidth, rows.start, rows.count);
   }
 
   void clear() {
@@ -364,7 +424,7 @@ class ParticleSet {
     if (states.rows() != particleSize()) m_bandwidth.reset();
     m_states = states;
     m_logWeights.setConstant(size(), -Eigen::numext::log(Scalar(size())));
-    adoptSize();
+    fitSpace();
   }
 
   /** Replaces the particles and weights. Clears the bandwidth if the dimension changes. */
@@ -376,7 +436,7 @@ class ParticleSet {
     if (states.rows() != particleSize()) m_bandwidth.reset();
     m_states = states;
     m_logWeights = logWeights.derived().array();
-    adoptSize();
+    fitSpace();
   }
 
   /** Appends a particle. Costs O(size()) because the storage is contiguous.
@@ -654,12 +714,13 @@ class ParticleSet {
     return internal::conditionalParticles(*this, kdeBandwidth(), given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>); see
+   * Gaussian::conditional<GivenPath...>() for the result's space.
+   */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalParticles(*this, kdeBandwidth(), internal::asIndexSet(idx<Space_, GivenPath...>),
-                                          values);
+    return internal::tagConditionalParticles<GivenPath...>(*this, kdeBandwidth(), values);
   }
 
   /** Validates the weights and builds a kernel density estimate with kdeBandwidth():
@@ -728,20 +789,14 @@ class ParticleSet {
     EIGEN_FILTER_ASSERT(i >= 0 && i < size() && "particle index out of range");
   }
 
-  /** Sizes a runtime space to the states, checks the size fits, and normalizes the states. */
-  void adoptSize() {
+  /** Resizes a space with one resizable block to the states, checks that the sizes match, and
+   * normalizes the states.
+   */
+  void fitSpace() {
     if constexpr (requires { m_space.resize(particleSize()); }) {
       if (m_space.size() != particleSize()) m_space.resize(particleSize());
     }
-    checkSpace();
-  }
-
-  /** Checks that the states fit the space and normalizes them. */
-  void checkSpace() {
-    if constexpr (requires { m_space.size(); }) {
-      EIGEN_FILTER_ASSERT(m_space.size() == particleSize() && "the space has a different number of coordinates");
-    }
-    EIGEN_FILTER_ASSERT(isValidSize<Space_>(particleSize()) && "the size does not fit the space");
+    EIGEN_FILTER_ASSERT(m_space.size() == particleSize() && "the size does not fit the space");
     m_space.normalizeValues(m_states);
   }
 

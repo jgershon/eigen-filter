@@ -40,7 +40,20 @@ namespace internal {
 template <template <typename, typename, typename> typename Marginal, typename... Path, typename Source>
 [[nodiscard]] auto tagMarginal(const Source& source);
 
-/** Shared implementation of Gaussian::conditional() and GaussianDensity::conditional(). */
+/** Shared implementation of Gaussian::conditional() and GaussianDensity::conditional(), with
+ * resolved indices and the target's space.
+ */
+template <typename Source, typename Target, typename Given, typename Derived, typename TargetSpace>
+[[nodiscard]] auto conditionalGaussianIn(const Source& source, const Target& target, const Given& given,
+                                         const Eigen::MatrixBase<Derived>& values, const TargetSpace& targetSpace) {
+  EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
+  const auto givenSpace{
+      projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(source.space(), source.size(), given)};
+  auto result{conditionMoments(source.mean(), source.cov(), target, given, values, givenSpace, targetSpace)};
+  return Gaussian<typename Source::Scalar, TargetSpace>{targetSpace, std::move(result.mean), std::move(result.cov)};
+}
+
+/** conditionalGaussianIn() for any index sets, with the target in the projection of the source's space. */
 template <typename Source, typename TargetIndices, typename GivenIndices, typename Derived>
 [[nodiscard]] auto conditionalGaussian(const Source& source, const TargetIndices& targetIndices,
                                        const GivenIndices& givenIndices, const Eigen::MatrixBase<Derived>& values) {
@@ -48,16 +61,19 @@ template <typename Source, typename TargetIndices, typename GivenIndices, typena
   constexpr int SourceMaxSize{Source::MaxSizeAtCompileTime};
   const auto target{resolveIndices<SourceSize, SourceMaxSize>(source.size(), targetIndices)};
   const auto given{resolveIndices<SourceSize, SourceMaxSize>(source.size(), givenIndices)};
-  EIGEN_FILTER_ASSERT(distinctIndices(target, given) && "target and given indices must be distinct");
   using Target = std::remove_cvref_t<decltype(target)>;
-  using Given = std::remove_cvref_t<decltype(given)>;
-  const auto targetSpace{
-      projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(source.space(), source.size(), target)};
-  const auto givenSpace{
-      projectSpace<Given::RowsAtCompileTime, Given::MaxRowsAtCompileTime>(source.space(), source.size(), given)};
-  auto result{conditionMoments(source.mean(), source.cov(), target, given, values, givenSpace, targetSpace)};
-  return Gaussian<typename Source::Scalar, std::remove_cvref_t<decltype(targetSpace)>>{
-      targetSpace, std::move(result.mean), std::move(result.cov)};
+  return conditionalGaussianIn(
+      source, target, given, values,
+      projectSpace<Target::RowsAtCompileTime, Target::MaxRowsAtCompileTime>(source.space(), source.size(), target));
+}
+
+/** Shared implementation of conditional<GivenPath...>(); see tagConditional(). */
+template <typename... GivenPath, typename Source, typename Derived>
+[[nodiscard]] auto tagConditionalGaussian(const Source& source, const Eigen::MatrixBase<Derived>& values) {
+  return tagConditional<Source::SizeAtCompileTime, Source::MaxSizeAtCompileTime, GivenPath...>(
+      source.space(), source.size(), [&](const auto& target, const auto& given, const auto& targetSpace) {
+        return conditionalGaussianIn(source, target, given, values, targetSpace);
+      });
 }
 
 /** conditionalGaussian() with every entry not in \a givenIndices as the target. */
@@ -82,6 +98,10 @@ template <typename Source, typename GivenIndices, typename Derived>
  * marginal() returns a read-only view of a subset of the entries. While any
  * marginal is alive this object is borrowed: its values may change, but resizing,
  * moving, or destroying it is a programmer error caught by \c EIGEN_FILTER_ASSERT.
+ *
+ * The space's size always matches the mean's. insert() and erase() grow and shrink one
+ * resizable block of the space in place, such as adding or dropping a landmark, and
+ * resize() resizes a space with a single resizable block.
  *
  * The space describes how each coordinate behaves (see \ref Spaces). The mean is
  * normalized whenever it is set, and residuals are normalized before they are used, so
@@ -114,27 +134,30 @@ class Gaussian {
   Gaussian() = default;
 
   /** Constructs a Gaussian of dimension \a n with uninitialized contents. */
-  explicit Gaussian(Index n) : m_moments{n} { adoptDefaultSpace(); }
+  explicit Gaussian(Index n) : m_moments{n} { fitSpace(); }
 
-  explicit Gaussian(MomentsType moments) : m_moments{std::move(moments)} { adoptDefaultSpace(); }
+  explicit Gaussian(MomentsType moments) : m_moments{std::move(moments)} { fitSpace(); }
 
   template <typename MeanDerived, typename CovDerived>
   Gaussian(const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
       : m_moments{mean, cov} {
-    adoptDefaultSpace();
+    fitSpace();
   }
 
-  /** Constructs a Gaussian of dimension \a n in \a space, with uninitialized contents. */
-  Gaussian(Space_ space, Index n) : m_moments{n}, m_space{std::move(space)} { checkSpace(); }
+  /** Constructs a Gaussian in \a space, with uninitialized contents. */
+  explicit Gaussian(Space_ space) : m_moments{space.size()}, m_space{std::move(space)} { fitSpace(); }
 
-  Gaussian(Space_ space, MomentsType moments) : m_moments{std::move(moments)}, m_space{std::move(space)} {
-    checkSpace();
-  }
+  /** Constructs a Gaussian of dimension \a n in \a space, with uninitialized contents. A space
+   * with one resizable block is resized to \a n; any other must already have size \a n.
+   */
+  Gaussian(Space_ space, Index n) : m_moments{n}, m_space{std::move(space)} { fitSpace(); }
+
+  Gaussian(Space_ space, MomentsType moments) : m_moments{std::move(moments)}, m_space{std::move(space)} { fitSpace(); }
 
   template <typename MeanDerived, typename CovDerived>
   Gaussian(Space_ space, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov)
       : m_moments{mean, cov}, m_space{std::move(space)} {
-    checkSpace();
+    fitSpace();
   }
 
   /** Copies the data and any valid factorization. The copy starts unlocked. */
@@ -191,15 +214,62 @@ class Gaussian {
 
   [[nodiscard]] Index size() const { return m_moments.size(); }
 
-  /** Resizes mean, covariance, and factorization. \a n must fit the space. Contents are
-   * unspecified afterward.
+  /** Resizes mean, covariance, and factorization, and a space with one resizable block, to
+   * dimension \a n. Contents are unspecified afterward. To grow or shrink one of several
+   * resizable blocks, use insert() and erase().
    */
   void resize(Index n) {
     assertUnlocked();
     assertUnborrowed();
-    EIGEN_FILTER_ASSERT(isValidSize<Space_>(n) && "the size does not fit the space");
-    m_moments.resize(n);
     if constexpr (requires { m_space.resize(n); }) m_space.resize(n);
+    EIGEN_FILTER_ASSERT(m_space.size() == n && "the size does not fit the space");
+    m_moments.resize(n);
+    m_factorValid = false;
+  }
+
+  /** Inserts the entries \a mean into the resizable block named by the tag path \a Path,
+   * before its element \a element, with covariance \a cov and cross-covariance \a cross
+   * with the existing entries (one column per existing entry, in order). The space's block
+   * grows to match.
+   *
+   * An element is one repetition of a Repeated block, or one coordinate of a resizable
+   * Linear, Periodic, or Bounded block; \a mean holds one or more whole elements.
+   */
+  template <typename... Path, typename MeanDerived, typename CovDerived, typename CrossDerived>
+    requires(sizeof...(Path) > 0)
+  void insert(Index element, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov,
+              const Eigen::MatrixBase<CrossDerived>& cross) {
+    assertUnlocked();
+    assertUnborrowed();
+    EIGEN_FILTER_ASSERT(cov.rows() == mean.size() && cov.cols() == mean.size());
+    EIGEN_FILTER_ASSERT(cross.rows() == mean.size() && cross.cols() == size());
+    const auto rows{internal::growBlock<Path...>(m_space, element, mean.size())};
+    internal::insertRows(m_moments.mean(), rows.start, mean);
+    internal::insertSymmetric(m_moments.cov(), rows.start, cov, cross);
+    m_space.normalizeValues(m_moments.mean());
+    m_factorValid = false;
+  }
+
+  /** insert() of entries independent of the existing ones. */
+  template <typename... Path, typename MeanDerived, typename CovDerived>
+    requires(sizeof...(Path) > 0)
+  void insert(Index element, const Eigen::MatrixBase<MeanDerived>& mean, const Eigen::MatrixBase<CovDerived>& cov) {
+    insert<Path...>(element, mean, cov,
+                    Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>::Zero(mean.size(), size()));
+  }
+
+  /** Removes \a count elements of the resizable block named by the tag path \a Path,
+   * starting at its element \a element: the marginal of the rest. The space's block shrinks
+   * to match.
+   */
+  template <typename... Path>
+    requires(sizeof...(Path) > 0)
+  void erase(Index element, Index count = 1) {
+    assertUnlocked();
+    assertUnborrowed();
+    const auto rows{internal::shrinkBlock<Path...>(m_space, element, count)};
+    internal::eraseRows(m_moments.mean(), rows.start, rows.count);
+    internal::eraseSymmetric(m_moments.cov(), rows.start, rows.count);
     m_factorValid = false;
   }
 
@@ -265,11 +335,15 @@ class Gaussian {
     return internal::conditionalGaussian(*this, given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>).
+   *
+   * When \a GivenPath names one top-level block of a Composite space, the result is in the
+   * space of the remaining blocks; otherwise it is in the projection of this space.
+   */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalGaussian(*this, internal::asIndexSet(idx<Space_, GivenPath...>), values);
+    return internal::tagConditionalGaussian<GivenPath...>(*this, values);
   }
 
   /** Factorizes the covariance if it has changed since the last factorization.
@@ -321,18 +395,14 @@ class Gaussian {
     EIGEN_FILTER_ASSERT(m_borrowCount == 0 && "Gaussian is borrowed by a live marginal");
   }
 
-  /** Sizes a default-constructed space to the data and normalizes the mean. */
-  void adoptDefaultSpace() {
-    if constexpr (requires { m_space.resize(size()); }) m_space.resize(size());
-    checkSpace();
-  }
-
-  /** Checks that the data fits the space and normalizes the mean. */
-  void checkSpace() {
-    if constexpr (requires { m_space.size(); }) {
-      EIGEN_FILTER_ASSERT(m_space.size() == size() && "the space has a different number of coordinates");
+  /** Resizes a space with one resizable block to the data, checks that the sizes match, and
+   * normalizes the mean.
+   */
+  void fitSpace() {
+    if constexpr (requires { m_space.resize(size()); }) {
+      if (m_space.size() != size()) m_space.resize(size());
     }
-    EIGEN_FILTER_ASSERT(isValidSize<Space_>(size()) && "the size does not fit the space");
+    EIGEN_FILTER_ASSERT(m_space.size() == size() && "the size does not fit the space");
     m_space.normalizeValues(m_moments.mean());
   }
 
@@ -480,11 +550,15 @@ class GaussianDensity {
     return internal::conditionalGaussian(*this, given, values);
   }
 
-  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>). */
+  /** conditional() given the subspace named by the tag path \a GivenPath (see idx<>).
+   *
+   * When \a GivenPath names one top-level block of a Composite space, the result is in the
+   * space of the remaining blocks; otherwise it is in the projection of this space.
+   */
   template <typename... GivenPath, typename Derived>
     requires(sizeof...(GivenPath) > 0)
   [[nodiscard]] auto conditional(const Eigen::MatrixBase<Derived>& values) const {
-    return internal::conditionalGaussian(*this, internal::asIndexSet(idx<Space_, GivenPath...>), values);
+    return internal::tagConditionalGaussian<GivenPath...>(*this, values);
   }
 
  private:
@@ -579,13 +653,13 @@ class GaussianMarginal {
 
 namespace internal {
 
-/** Shared implementation of marginal<Path...>(): the marginal over idx<> of \a Path,
+/** Shared implementation of marginal<Path...>(): the marginal over idxIn() of \a Path,
  * whose space is the named subspace.
  */
 template <template <typename, typename, typename> typename Marginal, typename... Path, typename Source>
 [[nodiscard]] auto tagMarginal(const Source& source) {
   using Space = typename Source::SpaceType;
-  const auto indices{asIndexSet(idx<Space, Path...>)};
+  const auto indices{asIndexSet(idxIn<Path...>(source.space()))};
   auto space{subspace<Space, Path...>(source.space())};
   return Marginal<Source, std::remove_cvref_t<decltype(indices)>, decltype(space)>{source, indices, std::move(space)};
 }

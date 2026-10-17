@@ -137,7 +137,8 @@ TEST(GaussianSpace, ConditionalWrapsTheGivenResidual) {
   const auto expected{linear.conditional(std::array{2}, unwrapped)};
   EXPECT_LT((conditional.mean() - expected.mean()).norm(), 1e-12);
   EXPECT_LT((conditional.cov() - expected.cov()).norm(), 1e-12);
-  EXPECT_EQ(conditional.space().coordinate(2).kind, CoordinateKind::Bounded);
+  // Heading is a top-level block, so the rest of the state keeps its named blocks.
+  static_assert(std::is_same_v<decltype(conditional)::SpaceType, Composite<Position, Range>>);
 }
 
 TEST(GaussianSpace, ConditionalNormalizesTheTargetMean) {

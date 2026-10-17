@@ -13,7 +13,6 @@
 #include <type_traits>
 
 using EigenFilter::Composite;
-using EigenFilter::CoordinateKind;
 using EigenFilter::GaussianMixture;
 using EigenFilter::Linear;
 using EigenFilter::ParticleSet;
@@ -90,7 +89,7 @@ TEST(SpaceParticles, ConditionalWrapsAndKeepsTheTargetSpace) {
   EXPECT_TRUE((a.logWeights() - b.logWeights()).abs().maxCoeff() < 1e-12);
 
   const auto headingGivenPosition{set.conditional<Position>(Eigen::Matrix<double, 1, 1>{1.5})};
-  EXPECT_EQ(headingGivenPosition.space().coordinate(0).kind, CoordinateKind::Periodic);
+  static_assert(std::is_same_v<decltype(headingGivenPosition)::SpaceType, Heading>);
   EXPECT_TRUE((headingGivenPosition.states().array() >= -pi).all());
   EXPECT_TRUE((headingGivenPosition.states().array() < pi).all());
 }
@@ -126,7 +125,7 @@ TEST(SpaceMixture, MomentsAndDensityWrap) {
   EXPECT_TRUE((samples.row(1).array() >= -pi).all() && (samples.row(1).array() < pi).all());
 
   const auto conditional{mixture.conditional<Position>(Eigen::Matrix<double, 1, 1>{1.5})};
-  EXPECT_EQ(conditional.space().coordinate(0).kind, CoordinateKind::Periodic);
+  static_assert(std::is_same_v<decltype(conditional)::SpaceType, Heading>);
   const auto heading{mixture.marginal<Heading>().copy()};
   static_assert(std::is_same_v<decltype(heading)::SpaceType, Heading>);
 }
