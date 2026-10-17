@@ -121,13 +121,36 @@ TEST(FitMixture, StackedComponentsAreSeededOnce) {
 
 TEST(FitMixture, DuplicateParticlesLimitTheComponentCount) {
   Eigen::Matrix<double, 2, 100> states;
-  states.leftCols<50>().colwise() = trueMeans[0];
-  states.rightCols<50>().colwise() = trueMeans[2];
+  states.leftCols<50>().colwise() = Eigen::Vector2d{-6.0, -1.0};
+  states.rightCols<50>().colwise() = Eigen::Vector2d{6.0, 1.0};
   const MPS2 particles{states};
   std::mt19937_64 rng{59};
   const auto fit{EigenFilter::fitMixture(*particles.toParticleSet(), 5, rng)};
   ASSERT_TRUE(fit.has_value());
   EXPECT_EQ(fit->mixture.size(), 2);
+}
+
+TEST(FitMixture, FloorScalesWithEachDimension) {
+  // Dimensions a million times apart in scale: each component's floor follows its own dimension.
+  const auto truth{makeTrueMixture()};
+  std::mt19937_64 rng{83};
+  Eigen::Matrix2Xd samples{EigenFilter::drawSamples(*truth.toGaussianMixture(), 5000, rng)};
+  samples.row(1) *= 1e-6;
+  const MPS2 particles{samples};
+  const auto fit{
+      EigenFilter::fitMixture(*particles.toParticleSet(), 3, rng, FitOptions<double>{.regularization = 1e-2})};
+  ASSERT_TRUE(fit.has_value());
+  for (const auto& component : fit->mixture) {
+    EXPECT_LT(component.gaussian.cov()(1, 1), 1e-10) << "floor leaked across dimensions";
+  }
+}
+
+TEST(FitMixture, NoSpreadInOneDimensionIsDegenerate) {
+  Eigen::Matrix<double, 2, 10> states{Eigen::Matrix<double, 2, 10>::Random()};
+  states.row(1).setConstant(3.0);
+  const MPS2 particles{states};
+  std::mt19937_64 rng{89};
+  EXPECT_EQ(EigenFilter::fitMixture(*particles.toParticleSet(), 2, rng).error(), FitError::Degenerate);
 }
 
 TEST(FitMixture, SeedsFromAMixture) {
